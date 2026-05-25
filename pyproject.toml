@@ -1,0 +1,32 @@
+[project]
+name = "audio_validation"
+description = "Tools for validating audio data, including feature extraction and visualization."
+requires-python = ">=3.11"
+license = {file = "LICENSE"}
+maintainers = [
+  {name = "Hubert Stepniewski", email = "hubert.stepniewski@int2code.com" },
+  {name = "Marcin Tomiczek", email = "marcin.tomiczek@int2code.com" },
+  {name = "Piotr Sznapka", email = "piotr.sznapka@int2code.com" },
+]
+dynamic = ["dependencies", "version", "readme", "optional-dependencies"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}
+readme = {file = ["README.md"]}
+
+[tool.setuptools_scm]
+write_to = "src/audio_validation/_version.py"
+
+[tool.setuptools.dynamic.optional-dependencies]
+test = {file = ["requirements-test.txt"]}
+dev = {file = ["requirements-test.txt", "requirements-dev.txt"]}
+docs = { file = ["requirements-test.txt", "docs/requirements.txt"]  }
+
+[build-system]
+# These are the assumed default build requirements from pip:
+# https://pip.pypa.io/en/stable/reference/pip/#pep-517-and-518-support
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
