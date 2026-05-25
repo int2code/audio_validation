@@ -1,6 +1,7 @@
 [project]
 name = "audio_validation"
 description = "Tools for validating audio data, including feature extraction and visualization."
+readme = "README.md"
 requires-python = ">=3.11"
 license = {file = "LICENSE"}
 maintainers = [
@@ -8,14 +9,13 @@ maintainers = [
   {name = "Marcin Tomiczek", email = "marcin.tomiczek@int2code.com" },
   {name = "Piotr Sznapka", email = "piotr.sznapka@int2code.com" },
 ]
-dynamic = ["dependencies", "version", "readme", "optional-dependencies"]
+dynamic = ["dependencies", "version", "optional-dependencies"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.dynamic]
 dependencies = {file = ["requirements.txt"]}
-readme = {file = ["README.md"]}
 
 [tool.setuptools_scm]
 write_to = "src/audio_validation/_version.py"
