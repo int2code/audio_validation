@@ -1,4 +1,9 @@
-"""Classes for keeping audio features and utilities to compute them from raw samples."""
+"""Audio feature extraction and analysis utilities.
+
+Provides :class:`ChannelFeatures` (per-channel statistics, FFT peak detection and THD
+calculation) and :class:`AudioFeatures` (multi-channel container), plus helpers for
+plotting, WAV export and signal-onset detection.
+"""
 
 import logging
 import os
@@ -40,6 +45,8 @@ class ChannelFeatures:
     :cvar min: Minimum sample value.
     :cvar dbs: Level in dBFS (placeholder, populated as ``-90.0`` by default).
     :cvar mean: Arithmetic mean of the channel samples.
+    :cvar thd: Total Harmonic Distortion as a percentage (e.g. ``1.0`` for 1 % THD).
+        Populated when FFT detection is requested; ``0.0`` otherwise.
     :cvar start_audio_offset_s: Time in seconds from the start of the capture at
         which the signal was first detected as varying; ``-1`` if the channel is
         entirely silent.
@@ -55,6 +62,7 @@ class ChannelFeatures:
     min: float = 0
     dbs: float = 0
     mean: float = 0
+    thd: float = 0.0
     start_audio_offset_s: int = -1
 
     @staticmethod
@@ -85,7 +93,9 @@ class ChannelFeatures:
             already trimmed the samples (e.g. ``skip_latency=True`` in
             :meth:`AudioFeatures.compute`) so that the stored offset reflects
             the original capture position rather than a near-zero residual.
-        :return: Fully populated :class:`ChannelFeatures` instance.
+        :return: Fully populated :class:`ChannelFeatures` instance.  :attr:`thd`
+            is computed from the full FFT spectrum when FFT detection is
+            requested; ``0.0`` otherwise.
         """
         samples_float = samples.astype(np.float64)
         rms_val = round(np.sqrt(np.mean(samples_float**2)), 2)
@@ -99,6 +109,7 @@ class ChannelFeatures:
         failed_peaks = None
         peak_frequencies = None
         peak_amplitudes = None
+        thd_val = 0.0
 
         if (
             expected_frequencies is not None
@@ -108,8 +119,14 @@ class ChannelFeatures:
             expected_freq_approx = _calculate_approx_values(
                 expected_frequencies, tolerance
             )
-            peak_frequencies, peak_amplitudes = ChannelFeatures._calculate_ffts(
+            x_frequencies, y_amplitudes = ChannelFeatures._full_spectrum(
                 samples, sample_rate
+            )
+            peak_frequencies, peak_amplitudes = ChannelFeatures._peaks_from_spectrum(
+                x_frequencies, y_amplitudes
+            )
+            thd_val = ChannelFeatures.calculate_thd(
+                x_frequencies, y_amplitudes, sample_rate
             )
             checks = []
             failed_peaks = []
@@ -133,6 +150,7 @@ class ChannelFeatures:
             min=min_val,
             dbs=-90.0,
             mean=mean_val,
+            thd=thd_val,
             start_audio_offset_s=start_audio_offset_s,
         )
 
@@ -154,6 +172,37 @@ class ChannelFeatures:
         return ChannelFeatures._compute(samples=samples)
 
     @staticmethod
+    def _full_spectrum(samples, sample_rate=48000):
+        """Compute the normalised RFFT spectrum of a 1-D sample array.
+
+        :param samples: 1-D array of samples for a single channel.
+        :param sample_rate: Sample rate in Hz.
+        :return: Tuple ``(frequencies, amplitudes)`` — two 1-D arrays covering
+            **all** RFFT bins.  Amplitudes are normalised so the maximum value
+            is ``1.0``.
+        """
+        y_amplitudes = np.abs(rfft(samples))
+        y_amplitudes /= np.max(y_amplitudes)
+        x_frequencies = rfftfreq(samples.size, 1 / sample_rate)
+        return x_frequencies, y_amplitudes
+
+    @staticmethod
+    def _peaks_from_spectrum(x_frequencies, y_amplitudes, **find_peaks_kwargs):
+        """Extract RFFT peaks from a precomputed spectrum.
+
+        :param x_frequencies: 1-D array of FFT bin frequencies in Hz (all bins).
+        :param y_amplitudes: 1-D array of normalised FFT amplitudes.
+        :param find_peaks_kwargs: Forwarded to :func:`scipy.signal.find_peaks`;
+            defaults are ``prominence=0.03, height=0.3``.
+        :return: Tuple ``(frequencies, amplitudes)`` — two 1-D arrays of
+            detected peak frequencies (Hz) and their normalised amplitudes.
+        """
+        default_kwargs = {"prominence": 0.03, "height": 0.3}
+        kwargs = default_kwargs | find_peaks_kwargs
+        p_idx, _ = find_peaks(y_amplitudes, **kwargs)
+        return x_frequencies[p_idx], y_amplitudes[p_idx]
+
+    @staticmethod
     def _calculate_ffts(samples, sample_rate=48000, **find_peaks_kwargs):
         """Calculate RFFT peaks from a 1-D sample array.
 
@@ -164,15 +213,93 @@ class ChannelFeatures:
         :return: Tuple ``(frequencies, amplitudes)`` — two 1-D arrays of
             detected peak frequencies (Hz) and their normalised amplitudes.
         """
-        default_kwargs = {"prominence": 0.03, "height": 0.3}
-        kwargs = default_kwargs | find_peaks_kwargs
+        x_frequencies, y_amplitudes = ChannelFeatures._full_spectrum(
+            samples, sample_rate
+        )
+        return ChannelFeatures._peaks_from_spectrum(
+            x_frequencies, y_amplitudes, **find_peaks_kwargs
+        )
 
-        y_amplitudes = np.abs(rfft(samples))
-        y_amplitudes /= np.max(y_amplitudes)
-        x_frequencies = rfftfreq(samples.size, 1 / sample_rate)
-        p_idx, _ = find_peaks(y_amplitudes, **kwargs)
+    @staticmethod
+    def calculate_thd(
+        freqs: np.ndarray,
+        amplitudes: np.ndarray,
+        samplerate: int,
+        num_harmonics: int = 5,
+    ) -> float:
+        """Calculate Total Harmonic Distortion (THD) from a full FFT spectrum.
 
-        return x_frequencies[p_idx], y_amplitudes[p_idx]
+        Uses the power-ratio definition::
+
+            THD = sqrt(P2 + P3 + ... + Pn) / P1 * 100 %
+
+        where ``P1`` is the power at the fundamental frequency and ``P2``–``Pn``
+        are the powers at the 2nd through *num_harmonics*-th harmonics.  Energy
+        at each harmonic is summed over a narrow bin window to account for
+        spectral leakage (see :meth:`_get_freq_energy`).  Harmonics above the
+        Nyquist frequency are excluded automatically.
+
+        :param freqs: 1-D array of FFT bin frequencies in Hz — **all bins**, not
+            just detected peaks (e.g. as returned by
+            :func:`scipy.fftpack.rfftfreq`).
+        :param amplitudes: 1-D array of normalised FFT amplitudes corresponding
+            to *freqs*; should be normalised so the maximum value is ``1.0``.
+        :param samplerate: Sample rate in Hz; used to exclude harmonics above
+            the Nyquist frequency.
+        :param num_harmonics: Number of harmonics above the fundamental to
+            include (default ``5``, covering harmonics 2–6).
+        :return: THD as a percentage (e.g. ``1.0`` for 1 % THD).  Returns
+            ``0.0`` when the fundamental frequency or its power is zero.
+        """
+        fund_freq = freqs[np.argmax(amplitudes)]
+
+        if fund_freq <= 0:
+            return 0.0
+
+        fund_power = ChannelFeatures._get_freq_energy(
+            freqs, amplitudes, fund_freq, samplerate
+        )
+        if fund_power == 0:
+            return 0.0
+
+        harmonics_power = sum(
+            ChannelFeatures._get_freq_energy(
+                freqs, amplitudes, n * fund_freq, samplerate
+            )
+            for n in range(2, num_harmonics + 1)
+        )
+
+        return np.sqrt(harmonics_power / fund_power) * 100
+
+    @staticmethod
+    def _get_freq_energy(
+        freqs: np.ndarray, amplitude: np.ndarray, harm_freq: float, samplerate: int
+    ) -> float:
+        """Return the summed squared amplitude in a 7-bin window centred on *harm_freq*.
+
+        FFT windowing spreads the energy of a pure tone across several adjacent
+        bins.  Summing a narrow neighbourhood captures the total power of that
+        harmonic more accurately than reading a single bin.  Returns ``0.0``
+        immediately when *harm_freq* is at or above the Nyquist frequency.
+
+        :param freqs: 1-D array of FFT bin frequencies in Hz (all bins).
+        :param amplitude: 1-D array of normalised FFT amplitudes corresponding
+            to *freqs*.
+        :param harm_freq: Target frequency in Hz (typically a harmonic of the
+            fundamental).
+        :param samplerate: Sample rate in Hz — used to compute the Nyquist limit.
+        :return: Sum of squared amplitudes in the ±3-bin window around the
+            closest bin to *harm_freq*; ``0.0`` if above Nyquist.
+        """
+        # Avoid calculating harmonics above Nyquist frequency.
+        if harm_freq >= samplerate / 2:
+            return 0.0
+
+        idx = np.argmin(np.abs(freqs - harm_freq))
+        lower = max(0, idx - 3)
+        upper = min(amplitude.size - 1, idx + 4)
+
+        return np.sum(amplitude[lower:upper] ** 2)
 
 
 @dataclass
@@ -245,9 +372,11 @@ class AudioFeatures:
 
             pre_trim_offset_s: Optional[float] = None
             if skip_latency:
-                pre_trim_offset_s = get_audio_start_offset(ch_samples, sample_rate)
+                pre_trim_offset_s = get_audio_start_offset(
+                    ch_samples, sample_rate)
                 if pre_trim_offset_s >= 0:
-                    ch_samples = ch_samples[int(pre_trim_offset_s * sample_rate) :]
+                    ch_samples = ch_samples[int(
+                        pre_trim_offset_s * sample_rate):]
                 else:
                     logger.debug(
                         "skip_latency: channel %d is entirely silent, no trimming.", ch
@@ -424,7 +553,7 @@ def detect_if_signal_changes(
         return np.zeros(0, dtype=bool)
     result = np.zeros(n_windows - 1, dtype=bool)
     for i, _ in enumerate(result):
-        window = samples[i * window_size : (i + 1) * window_size]
+        window = samples[i * window_size: (i + 1) * window_size]
         if abs(np.std(window)) > threshold:
             result[i] = True
     return result
