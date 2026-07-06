@@ -392,12 +392,24 @@ class AudioFeatures:
                 )
                 if pre_trim_offset_s >= 0:
                     ch_samples = ch_samples[int(pre_trim_offset_s * sample_rate) :]
+                    logger.debug(
+                        "skip_latency: channel %d trimmed %.3f s (%.0f samples)",
+                        ch,
+                        pre_trim_offset_s,
+                        pre_trim_offset_s * sample_rate,
+                    )
                 else:
                     logger.debug(
                         "skip_latency: channel %d is entirely silent, no trimming.", ch
                     )
             elif skip_first > 0:
                 ch_samples = ch_samples[skip_first:]
+                logger.debug(
+                    "skip_first: channel %d trimmed %d samples (%.3f s)",
+                    ch,
+                    skip_first,
+                    skip_first / sample_rate,
+                )
 
             ch_freqs = (
                 expected_frequencies[ch] if expected_frequencies is not None else None
@@ -417,13 +429,28 @@ class AudioFeatures:
 
     @staticmethod
     def from_wav(
-        filepath: str, channels: int = 1, skip_first: int = 0
+        filepath: str,
+        channels: int = 1,
+        sample_rate: int = 48000,
+        expected_frequencies: list = None,
+        tolerance: Union[int, float] = None,
+        freq_checker: Callable = None,
+        skip_first: int = 0,
+        skip_latency: bool = False,
+        activity_threshold: float = 100,
     ) -> "AudioFeatures":
         """Build :class:`AudioFeatures` from a WAV file (no FFT detection).
 
         :param filepath: Path to the WAV file.
         :param channels: Number of channels to load (first *channels* tracks).
         :param skip_first: Samples to discard from the front of every channel.
+        :param skip_latency: If ``True``, automatically skip initial silence based on *activity_threshold*.
+        :param activity_threshold: Standard-deviation threshold, in the same
+            units as *samples*, used to detect signal onset (see
+            :func:`get_audio_start_offset`).  Defaults to ``100`` (tuned for
+            integer-PCM samples); pass a smaller value for float-voltage
+            captures so that *skip_latency* and the ``start_audio_offset_s``
+            field behave correctly.
         :return: :class:`AudioFeatures` with basic statistics per channel;
             ``detected`` is ``False`` on every :class:`ChannelFeatures`.
         """
@@ -434,7 +461,15 @@ class AudioFeatures:
         wav_samples = data[:, :channels]
         if skip_first:
             wav_samples = wav_samples[skip_first:]
-        return AudioFeatures.compute(samples=wav_samples)
+        return AudioFeatures.compute(
+            samples=wav_samples,
+            sample_rate=sample_rate,
+            expected_frequencies=expected_frequencies,
+            tolerance=tolerance,
+            freq_checker=freq_checker,
+            skip_latency=skip_latency,
+            activity_threshold=activity_threshold,
+        )
 
 
 def _calculate_approx_values(
