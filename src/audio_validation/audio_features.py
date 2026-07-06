@@ -17,6 +17,7 @@ from _pytest.python_api import ApproxBase
 from matplotlib import pyplot as plt
 from scipy.fftpack import rfft, rfftfreq
 from scipy.signal import find_peaks
+from scipy.signal.windows import blackmanharris
 from scipy.io import wavfile
 
 logger = logging.getLogger(__name__)
@@ -46,7 +47,13 @@ class ChannelFeatures:
     :cvar dbs: Level in dBFS (placeholder, populated as ``-90.0`` by default).
     :cvar mean: Arithmetic mean of the channel samples.
     :cvar thd: Total Harmonic Distortion as a percentage (e.g. ``1.0`` for 1 % THD).
-        Populated when FFT detection is requested; ``0.0`` otherwise.
+        Measures only the energy at integer harmonics of the fundamental.
+        Populated when FFT detection is requested; ``None`` otherwise.
+    :cvar thd_n: Total Harmonic Distortion + Noise as a percentage.  Unlike
+        :attr:`thd`, it measures *all* non-fundamental energy (harmonics **and**
+        broadband noise) relative to the fundamental, so a noisy-but-harmonically
+        -clean signal has low :attr:`thd` yet high :attr:`thd_n`.  Populated when
+        FFT detection is requested; ``None`` otherwise.
     :cvar start_audio_offset_s: Time in seconds from the start of the capture at
         which the signal was first detected as varying; ``-1`` if the channel is
         entirely silent.
@@ -63,6 +70,7 @@ class ChannelFeatures:
     dbs: float = 0
     mean: float = 0
     thd: float = None
+    thd_n: float = None
     start_audio_offset_s: int = -1
 
     @staticmethod
@@ -100,8 +108,8 @@ class ChannelFeatures:
             for integer-PCM samples); use a smaller value for float-voltage
             captures.
         :return: Fully populated :class:`ChannelFeatures` instance.  :attr:`thd`
-            is computed from the full FFT spectrum when FFT detection is
-            requested; ``0.0`` otherwise.
+            and :attr:`thd_n` are computed when FFT detection is requested;
+            ``None`` otherwise.
         """
         samples_float = samples.astype(np.float64)
         rms_val = round(np.sqrt(np.mean(samples_float**2)), 2)
@@ -118,6 +126,7 @@ class ChannelFeatures:
         peak_frequencies = None
         peak_amplitudes = None
         thd_val = None
+        thd_n_val = None
 
         if (
             expected_frequencies is not None
@@ -136,6 +145,7 @@ class ChannelFeatures:
             thd_val = ChannelFeatures.calculate_thd(
                 x_frequencies, y_amplitudes, sample_rate
             )
+            thd_n_val = ChannelFeatures.calculate_thd_n(samples, sample_rate)
             checks = []
             failed_peaks = []
 
@@ -159,6 +169,7 @@ class ChannelFeatures:
             dbs=-90.0,
             mean=mean_val,
             thd=thd_val,
+            thd_n=thd_n_val,
             start_audio_offset_s=start_audio_offset_s,
         )
 
@@ -280,6 +291,66 @@ class ChannelFeatures:
         return np.sqrt(harmonics_power / fund_power) * 100
 
     @staticmethod
+    def calculate_thd_n(
+        samples: np.ndarray, fundamental_bins: int = 8
+    ) -> float:
+        """Calculate Total Harmonic Distortion + Noise (THD+N) of a channel.
+
+        THD+N extends :meth:`calculate_thd`: where THD counts only the energy at
+        integer harmonics of the fundamental, THD+N counts **every** component
+        other than the fundamental — harmonics *and* broadband noise, hum,
+        aliasing, etc.  It is the metric that reflects how "dirty" a signal
+        actually is, and it is conceptually always ``>=`` the harmonic-only
+        THD::
+
+            THD+N = sqrt((P_total - P_fundamental) / P_fundamental) * 100 %
+
+        A signal whose distortion is purely random noise (no strong harmonics)
+        therefore has a low :meth:`calculate_thd` but a high THD+N.  The value is
+        expressed relative to the fundamental power (same reference as
+        :meth:`calculate_thd`, so the two are directly comparable).
+
+        Implementation notes: the signal is de-meaned (so a DC offset is not
+        counted as noise) and a **Blackman-Harris** window is applied before the
+        FFT.  Because THD+N integrates *all* frequency bins, the analysis
+        window's own spectral leakage sets the measurement floor; Blackman-Harris
+        has ~-92 dB side lobes, keeping the fundamental's leakage well below a
+        clean signal's noise floor.  A lower-side-lobe window (e.g. Hann,
+        ~-31 dB) would swamp the noise estimate and make the result swing wildly
+        with the exact capture length.  The fundamental is then removed by
+        excluding the *fundamental_bins* bins either side of its peak, which
+        covers the window's main lobe.
+
+        :param samples: 1-D array of samples for a single channel.
+        :param fundamental_bins: Number of bins removed either side of the
+            fundamental peak to exclude the window's main lobe (default ``8``,
+            comfortably wider than the Blackman-Harris main lobe).
+        :return: THD+N as a percentage (e.g. ``1.0`` for 1 %).  Returns ``0.0``
+            when the signal is too short or the fundamental power is zero.
+        """
+        signal = np.asarray(samples, dtype=np.float64)
+        if signal.size < 2:
+            return 0.0
+
+        signal = signal - np.mean(signal)
+        windowed = signal * blackmanharris(signal.size)
+        amplitudes = np.abs(rfft(windowed))
+
+        # Total power of everything except the DC bin.
+        total_power = float(np.sum(amplitudes[1:] ** 2))
+        fund_idx = int(np.argmax(amplitudes[1:])) + 1
+
+        # Remove the whole main lobe around the fundamental peak.
+        lower = max(1, fund_idx - fundamental_bins)
+        upper = min(amplitudes.size, fund_idx + fundamental_bins + 1)
+        fund_power = float(np.sum(amplitudes[lower:upper] ** 2))
+        if fund_power == 0:
+            return 0.0
+
+        residual_power = max(total_power - fund_power, 0.0)
+        return np.sqrt(residual_power / fund_power) * 100
+
+    @staticmethod
     def _get_freq_energy(
         freqs: np.ndarray, amplitude: np.ndarray, harm_freq: float, samplerate: int
     ) -> float:
@@ -391,7 +462,8 @@ class AudioFeatures:
                     ch_samples, sample_rate, threshold=activity_threshold
                 )
                 if pre_trim_offset_s >= 0:
-                    ch_samples = ch_samples[int(pre_trim_offset_s * sample_rate) :]
+                    ch_samples = ch_samples[int(
+                        pre_trim_offset_s * sample_rate):]
                     logger.debug(
                         "skip_latency: channel %d trimmed %.3f s (%.0f samples)",
                         ch,
@@ -604,7 +676,7 @@ def detect_if_signal_changes(
         return np.zeros(0, dtype=bool)
     result = np.zeros(n_windows - 1, dtype=bool)
     for i, _ in enumerate(result):
-        window = samples[i * window_size : (i + 1) * window_size]
+        window = samples[i * window_size: (i + 1) * window_size]
         if abs(np.std(window)) > threshold:
             result[i] = True
     return result
