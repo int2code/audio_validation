@@ -73,6 +73,7 @@ class ChannelFeatures:
         tolerance: Union[int, float] = None,
         freq_checker: Callable = None,
         start_audio_offset_s: Optional[float] = None,
+        activity_threshold: float = 100,
     ) -> "ChannelFeatures":
         """Compute all audio features from a 1-D single-channel sample array.
 
@@ -93,6 +94,11 @@ class ChannelFeatures:
             already trimmed the samples (e.g. ``skip_latency=True`` in
             :meth:`AudioFeatures.compute`) so that the stored offset reflects
             the original capture position rather than a near-zero residual.
+        :param activity_threshold: Standard-deviation threshold, in the same
+            units as *samples*, passed to :func:`get_audio_start_offset` when
+            *start_audio_offset_s* is not supplied.  Defaults to ``100`` (tuned
+            for integer-PCM samples); use a smaller value for float-voltage
+            captures.
         :return: Fully populated :class:`ChannelFeatures` instance.  :attr:`thd`
             is computed from the full FFT spectrum when FFT detection is
             requested; ``0.0`` otherwise.
@@ -103,7 +109,9 @@ class ChannelFeatures:
         min_val = float(np.min(samples))
         mean_val = float(np.mean(samples))
         if start_audio_offset_s is None:
-            start_audio_offset_s = get_audio_start_offset(samples, sample_rate)
+            start_audio_offset_s = get_audio_start_offset(
+                samples, sample_rate, threshold=activity_threshold
+            )
 
         detected = False
         failed_peaks = None
@@ -341,6 +349,7 @@ class AudioFeatures:
         freq_checker: Callable = None,
         skip_first: int = 0,
         skip_latency: bool = False,
+        activity_threshold: float = 100,
     ) -> "AudioFeatures":
         """Build :class:`AudioFeatures` from a multi-channel sample array.
 
@@ -361,6 +370,12 @@ class AudioFeatures:
             (ignored when *skip_latency* is ``True``).
         :param skip_latency: When ``True``, auto-detect the signal start and
             trim the silent prefix instead of using *skip_first*.
+        :param activity_threshold: Standard-deviation threshold, in the same
+            units as *samples*, used to detect signal onset (see
+            :func:`get_audio_start_offset`).  Defaults to ``100`` (tuned for
+            integer-PCM samples); pass a smaller value for float-voltage
+            captures so that *skip_latency* and the ``start_audio_offset_s``
+            field behave correctly.
         :return: :class:`AudioFeatures` with ``samples`` and
             ``channel_features`` populated.
         """
@@ -372,7 +387,9 @@ class AudioFeatures:
 
             pre_trim_offset_s: Optional[float] = None
             if skip_latency:
-                pre_trim_offset_s = get_audio_start_offset(ch_samples, sample_rate)
+                pre_trim_offset_s = get_audio_start_offset(
+                    ch_samples, sample_rate, threshold=activity_threshold
+                )
                 if pre_trim_offset_s >= 0:
                     ch_samples = ch_samples[int(pre_trim_offset_s * sample_rate) :]
                 else:
@@ -392,6 +409,7 @@ class AudioFeatures:
                 tolerance=tolerance,
                 freq_checker=freq_checker,
                 start_audio_offset_s=pre_trim_offset_s,
+                activity_threshold=activity_threshold,
             )
             channel_features.append(ch_features)
 
