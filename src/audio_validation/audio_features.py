@@ -291,9 +291,7 @@ class ChannelFeatures:
         return np.sqrt(harmonics_power / fund_power) * 100
 
     @staticmethod
-    def calculate_thd_n(
-        samples: np.ndarray, fundamental_bins: int = 8
-    ) -> float:
+    def calculate_thd_n(samples: np.ndarray, fundamental_bins: int = 8) -> float:
         """Calculate Total Harmonic Distortion + Noise (THD+N) of a channel.
 
         THD+N extends :meth:`calculate_thd`: where THD counts only the energy at
@@ -462,8 +460,7 @@ class AudioFeatures:
                     ch_samples, sample_rate, threshold=activity_threshold
                 )
                 if pre_trim_offset_s >= 0:
-                    ch_samples = ch_samples[int(
-                        pre_trim_offset_s * sample_rate):]
+                    ch_samples = ch_samples[int(pre_trim_offset_s * sample_rate) :]
                     logger.debug(
                         "skip_latency: channel %d trimmed %.3f s (%.0f samples)",
                         ch,
@@ -516,7 +513,8 @@ class AudioFeatures:
         :param filepath: Path to the WAV file.
         :param channels: Number of channels to load (first *channels* tracks).
         :param skip_first: Samples to discard from the front of every channel.
-        :param skip_latency: If ``True``, automatically skip initial silence based on *activity_threshold*.
+        :param skip_latency: If ``True``, automatically skip initial silence
+            based on *activity_threshold*.
         :param activity_threshold: Standard-deviation threshold, in the same
             units as *samples*, used to detect signal onset (see
             :func:`get_audio_start_offset`).  Defaults to ``100`` (tuned for
@@ -676,7 +674,7 @@ def detect_if_signal_changes(
         return np.zeros(0, dtype=bool)
     result = np.zeros(n_windows - 1, dtype=bool)
     for i, _ in enumerate(result):
-        window = samples[i * window_size: (i + 1) * window_size]
+        window = samples[i * window_size : (i + 1) * window_size]
         if abs(np.std(window)) > threshold:
             result[i] = True
     return result
