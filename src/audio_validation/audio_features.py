@@ -62,7 +62,7 @@ class ChannelFeatures:
     min: float = 0
     dbs: float = 0
     mean: float = 0
-    thd: float = 0.0
+    thd: float = None
     start_audio_offset_s: int = -1
 
     @staticmethod
@@ -109,7 +109,7 @@ class ChannelFeatures:
         failed_peaks = None
         peak_frequencies = None
         peak_amplitudes = None
-        thd_val = 0.0
+        thd_val = None
 
         if (
             expected_frequencies is not None
@@ -372,11 +372,9 @@ class AudioFeatures:
 
             pre_trim_offset_s: Optional[float] = None
             if skip_latency:
-                pre_trim_offset_s = get_audio_start_offset(
-                    ch_samples, sample_rate)
+                pre_trim_offset_s = get_audio_start_offset(ch_samples, sample_rate)
                 if pre_trim_offset_s >= 0:
-                    ch_samples = ch_samples[int(
-                        pre_trim_offset_s * sample_rate):]
+                    ch_samples = ch_samples[int(pre_trim_offset_s * sample_rate) :]
                 else:
                     logger.debug(
                         "skip_latency: channel %d is entirely silent, no trimming.", ch
@@ -553,7 +551,7 @@ def detect_if_signal_changes(
         return np.zeros(0, dtype=bool)
     result = np.zeros(n_windows - 1, dtype=bool)
     for i, _ in enumerate(result):
-        window = samples[i * window_size: (i + 1) * window_size]
+        window = samples[i * window_size : (i + 1) * window_size]
         if abs(np.std(window)) > threshold:
             result[i] = True
     return result
