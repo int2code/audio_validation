@@ -69,6 +69,7 @@ class ValidationResult:  # pylint: disable=too-many-instance-attributes
         ``"stopped"``, ``"capture_error"``.
     :ivar wav_start_s/wav_end_s: coverage of the saved WAV relative to capture
         start.
+    :ivar plot_path: Path to the saved metrics-timeline plot, or ``None``.
     """
 
     stopped_reason: str
@@ -79,6 +80,7 @@ class ValidationResult:  # pylint: disable=too-many-instance-attributes
     wav_end_s: Optional[float]
     total_captured_s: float
     error: Optional[str] = None
+    plot_path: Optional[str] = None
 
     def metrics_dataframe(self) -> pd.DataFrame:
         """Flatten the metrics timeline to one row per (chunk, channel)."""

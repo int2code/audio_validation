@@ -35,6 +35,7 @@ from audio_validation.continous_validation.models import (
     FailureInfo,
     RawChunk,
 )
+from audio_validation.continous_validation.plots import plot_metrics_timeline
 from audio_validation.continous_validation.recorder import Recorder
 from audio_validation.continous_validation.retention import RetentionBuffer
 
@@ -59,6 +60,8 @@ class ValidatorConfig:
     :param wav_filename: Saved WAV filename.
     :param wav_dtype: Retained/saved sample dtype.
     :param queue_maxsize: Bounded queue size for producer/consumer backpressure.
+    :param plot_metrics: Render a metrics-timeline plot on finalisation.
+    :param plot_filename: Saved metrics-timeline plot filename.
     """
 
     sample_rate: int = 48000
@@ -73,6 +76,8 @@ class ValidatorConfig:
     wav_filename: str = "continuous_capture.wav"
     wav_dtype: str = "float32"
     queue_maxsize: int = 4
+    plot_metrics: bool = True
+    plot_filename: str = "continuous_metrics.png"
 
 
 class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
@@ -214,15 +219,15 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
         """Stop the recorder, serialised so concurrent callers don't overlap.
 
         Called by :meth:`stop` (to unblock a producer parked in ``recorder.read``)
-        and by the chunk reader's ``finally`` (normal teardown). ``recorder.stop()``
+        and by the chunk reader's ``finally`` (normal teardown). ``recorder.stop_capture()``
         implementations are idempotent, so calling it more than once is safe and
         ensures a recorder started late is still stopped.
         """
         with self._recorder_stop_lock:
             try:
-                self._recorder.stop()
+                self._recorder.stop_capture()
             except Exception:  # pylint: disable=broad-except
-                logger.exception("recorder.stop() raised")
+                logger.exception("recorder.stop_capture() raised")
 
     def _read_chunks(self) -> None:
         """
@@ -231,7 +236,7 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
         chunk_idx = 0
         total_samples = 0
         try:
-            self._recorder.start()
+            self._recorder.start_capture()
             while not self._stop.is_set() and not self._abort.is_set():
 
                 if (
@@ -249,7 +254,7 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
                 ):
                     break
 
-                chunk = self._recorder.read(self._chunk_samples)
+                chunk = self._recorder.read_capture(self._chunk_samples)
                 if chunk is None or len(chunk) == 0:
                     logger.warning("Recorder returned empty chunk, stopping.")
                     break
@@ -457,6 +462,22 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
                 ),
             )
 
+        plot_path: Optional[str] = None
+        if self._cfg.plot_metrics and metrics:
+            try:
+                os.makedirs(self._cfg.artifacts_dir, exist_ok=True)
+                plot_path = os.path.join(
+                    self._cfg.artifacts_dir, self._cfg.plot_filename
+                )
+                plot_metrics_timeline(
+                    metrics,
+                    plot_path,
+                    failure_time_s=failure.time_s if failure is not None else None,
+                )
+            except Exception:  # pylint: disable=broad-except
+                logger.exception("metrics timeline plot failed")
+                plot_path = None
+
         self._result = ValidationResult(
             stopped_reason=stopped_reason,
             failure=failure,
@@ -466,5 +487,6 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             wav_end_s=wav_end,
             total_captured_s=self._captured_time_s,
             error=error,
+            plot_path=plot_path,
         )
         return self._result
