@@ -316,6 +316,12 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             skip_latency=False,
             activity_threshold=criteria.silence_rms_threshold,
         )
+        logger.debug(
+            "Evaluating chunk %d: start=%.1fs end=%.1fs",
+            chunk.index,
+            chunk.start_s,
+            chunk.end_s,
+        )
         ok, reason = evaluate_chunk(features, criteria)
 
         metric = ChunkMetrics(

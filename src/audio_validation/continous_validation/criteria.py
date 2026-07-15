@@ -104,7 +104,7 @@ def check_silence(features: AudioFeatures, threshold: float) -> Tuple[bool, str]
         for ch, feat in enumerate(features.channel_features)
     ]
     df = pd.DataFrame(rows).set_index("ch")
-    logger.info("Silence check:\n%s", df.to_string())
+    logger.debug("Silence check:\n%s", df.to_string())
 
     non_silent_df = df[~df["silent"]]
     if non_silent_df.empty:
@@ -135,7 +135,7 @@ def check_audio_present(features: AudioFeatures, threshold: float) -> Tuple[bool
         for ch, feat in enumerate(features.channel_features)
     ]
     df = pd.DataFrame(rows).set_index("ch")
-    logger.info("Audio presence check:\n%s", df.to_string())
+    logger.debug("Audio presence check:\n%s", df.to_string())
 
     silent_df = df[~df["audio_present"]]
     if silent_df.empty:
@@ -168,7 +168,7 @@ def check_rms(
         for ch, feat in enumerate(features.channel_features)
     ]
     df = pd.DataFrame(rows).set_index("ch")
-    logger.info("RMS check:\n%s", df.to_string())
+    logger.debug("RMS check:\n%s", df.to_string())
 
     failed_df = df[~df["rms_ok"]]
     if failed_df.empty:
@@ -202,7 +202,7 @@ def check_frequency(features: AudioFeatures) -> Tuple[bool, str]:
         for ch, feat in enumerate(features.channel_features)
     ]
     df = pd.DataFrame(rows).set_index("ch")
-    logger.info("Frequency presence check:\n%s", df.to_string())
+    logger.debug("Frequency presence check:\n%s", df.to_string())
 
     failed_df = df[~df["detected"]]
     if failed_df.empty:
@@ -233,7 +233,7 @@ def check_thd(features: AudioFeatures, max_thd: float) -> Tuple[bool, str]:
         for ch, feat in enumerate(features.channel_features)
     ]
     df = pd.DataFrame(rows).set_index("ch")
-    logger.info("THD check:\n%s", df.to_string())
+    logger.debug("THD check:\n%s", df.to_string())
 
     failed_df = df[~df["thd_ok"]]
     if failed_df.empty:
@@ -266,7 +266,7 @@ def check_thd_n(features: AudioFeatures, max_thd_n: float) -> Tuple[bool, str]:
         for ch, feat in enumerate(features.channel_features)
     ]
     df = pd.DataFrame(rows).set_index("ch")
-    logger.info("THD+N check:\n%s", df.to_string())
+    logger.debug("THD+N check:\n%s", df.to_string())
 
     failed_df = df[~df["thd_n_ok"]]
     if failed_df.empty:
@@ -295,9 +295,7 @@ def evaluate_chunk(
     results: List[Tuple[bool, str]] = []
 
     if criteria.require_audio_present:
-        results.append(
-            check_audio_present(features, criteria.silence_rms_threshold)
-        )
+        results.append(check_audio_present(features, criteria.silence_rms_threshold))
     if criteria.expect_silence:
         results.append(check_silence(features, criteria.silence_rms_threshold))
     if criteria.expected_rms is not None and criteria.rms_tolerance is not None:
