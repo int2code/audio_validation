@@ -38,6 +38,7 @@ class AudioCriteria:
     :ivar expect_silence: Fail if any channel is non-silent.
     :ivar silence_rms_threshold: RMS at/below which a channel counts as silent;
         also used as the signal-activity threshold for feature computation.
+    :ivar require_audio_present: Fail if any channel is silent (RMS <= threshold).
     :ivar expected_rms: Per-channel expected RMS values.
     :ivar rms_tolerance: Allowed absolute deviation from :attr:`expected_rms`.
     :ivar max_thd: Maximum allowed THD percent (requires expected_frequencies).
@@ -51,6 +52,7 @@ class AudioCriteria:
     require_frequency: bool = False
     expect_silence: bool = False
     silence_rms_threshold: float = 0.05
+    require_audio_present: bool = False
     expected_rms: Optional[List[float]] = None
     rms_tolerance: Optional[float] = None
     max_thd: Optional[float] = None
@@ -110,6 +112,37 @@ def check_silence(features: AudioFeatures, threshold: float) -> Tuple[bool, str]
     return False, (
         f"Expected silence (RMS <= {threshold}) but audio detected on "
         f"{len(non_silent_df)} channel(s).\n{non_silent_df.to_string()}"
+    )
+
+
+def check_audio_present(features: AudioFeatures, threshold: float) -> Tuple[bool, str]:
+    """Check that every channel carries audio (RMS strictly above *threshold*).
+
+    Complement of :func:`check_silence`; mirrors the legacy
+    ``assert_audio_present`` presence check.
+
+    :param features: Per-channel features to check.
+    :param threshold: RMS strictly above which a channel counts as present.
+    :return: ``(True, "")`` if all channels are present, else ``(False, reason)``
+        naming the silent channels.
+    """
+    rows = [
+        {
+            "ch": _channel_label(ch),
+            "rms": feat.rms,
+            "audio_present": feat.rms > threshold,
+        }
+        for ch, feat in enumerate(features.channel_features)
+    ]
+    df = pd.DataFrame(rows).set_index("ch")
+    logger.info("Audio presence check:\n%s", df.to_string())
+
+    silent_df = df[~df["audio_present"]]
+    if silent_df.empty:
+        return True, ""
+    return False, (
+        f"No audio detected (RMS <= {threshold}) on {len(silent_df)} channel(s).\n"
+        f"{silent_df.to_string()}"
     )
 
 
@@ -261,6 +294,10 @@ def evaluate_chunk(
     """
     results: List[Tuple[bool, str]] = []
 
+    if criteria.require_audio_present:
+        results.append(
+            check_audio_present(features, criteria.silence_rms_threshold)
+        )
     if criteria.expect_silence:
         results.append(check_silence(features, criteria.silence_rms_threshold))
     if criteria.expected_rms is not None and criteria.rms_tolerance is not None:
