@@ -1,3 +1,7 @@
+### 0.3.0
+
+[MINOR] Add Continous Audio Validator.
+
 ### 0.2.0
 
 [MINOR] Add THD, THD+N calculation.
