@@ -19,6 +19,7 @@ import threading
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
 from dataclasses import dataclass, replace
+import time
 from typing import Callable, List, Optional
 
 from scipy.io import wavfile
@@ -55,11 +56,11 @@ class ValidatorConfig:
     :param pre_failure_s: Seconds retained before failure; ``None`` keeps all.
     :param post_failure_s: Seconds retained/captured after a failure.
     :param stop_on_failure: Stop the run on the first armed failure.
-    :param failure_consecutive: Consecutive failing chunks required to arm.
+    :param failure_consecutive: Consecutive failing chunks required to report run failure.
     :param artifacts_dir: Directory for persisted artifacts (for example WAV).
     :param wav_filename: Saved WAV filename.
     :param wav_dtype: Retained/saved sample dtype.
-    :param queue_maxsize: Bounded queue size for producer/consumer backpressure.
+    :param queue_maxsize: Bounded queue size for keeping audio chunks.
     :param plot_metrics: Render a metrics-timeline plot on finalisation.
     :param plot_filename: Saved metrics-timeline plot filename.
     """
@@ -68,7 +69,7 @@ class ValidatorConfig:
     channels: int = 2
     chunk_s: int = 10
     max_capture_s: Optional[int] = None
-    pre_failure_s: Optional[int] = 600
+    pre_failure_s: Optional[int] = 10 * 60
     post_failure_s: int = 60
     stop_on_failure: bool = True
     failure_consecutive: int = 1
@@ -164,6 +165,25 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
         """Atomically swap the active criteria (thread-safe)."""
         with self._state_lock:
             self._criteria = criteria
+
+    def set_empty_criteria(self) -> None:
+        """Set the active criteria to an empty one, effectively skipping checks."""
+        empty_criteria = AudioCriteria()  # no check is performed
+        self.update_criteria(empty_criteria)
+
+    def skip_check_and_update_criteria(
+        self, skip_chunks: int, criteria: AudioCriteria
+    ) -> None:
+        """Set the active criteria to an empty one, effectively skipping checks.
+
+        Then update the criteria to the provided one after a short delay.
+        This is useful for skipping checks during a known transient event.
+        """
+        self.set_empty_criteria()
+        time.sleep(
+            skip_chunks * self._cfg.chunk_s
+        )  # skip the specified number of chunks
+        self.update_criteria(criteria)
 
     def snapshot_metrics(self) -> List[ChunkMetrics]:
         """Return a copy of the metrics timeline collected so far."""
@@ -313,7 +333,7 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             expected_frequencies=criteria.expected_frequencies,
             tolerance=criteria.frequency_tolerance_hz if use_fft else None,
             freq_checker=criteria.freq_checker if use_fft else None,
-            skip_latency=False,
+            skip_latency=True if chunk.index == 0 else False,
             activity_threshold=criteria.silence_rms_threshold,
         )
         logger.debug(
@@ -365,7 +385,7 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
                 self._failure_time_s = chunk.end_s
                 self._failure_info = FailureInfo(
                     chunk_index=chunk.index,
-                    time_s=chunk.end_s,
+                    time_s=chunk.start_s,
                     reason=reason,
                     wav_offset_s=0.0,  # will be updated when wav is written
                 )
