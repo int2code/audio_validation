@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 _QUEUE_END_MARKER = None
 
 
+# pylint: disable=too-many-instance-attributes, too-many-public-methods
 @dataclass(frozen=True)
 class ValidatorConfig:
     """Configuration values for :class:`ContinuousAudioValidator`.
@@ -333,7 +334,7 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             expected_frequencies=criteria.expected_frequencies,
             tolerance=criteria.frequency_tolerance_hz if use_fft else None,
             freq_checker=criteria.freq_checker if use_fft else None,
-            skip_latency=True if chunk.index == 0 else False,
+            skip_latency=chunk.index == 0,
             activity_threshold=criteria.silence_rms_threshold,
         )
         logger.debug(

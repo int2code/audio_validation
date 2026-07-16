@@ -8,11 +8,13 @@ import logging
 from typing import List, Optional
 
 import matplotlib
+from audio_validation.continous_validation.models import ChunkMetrics
 
 matplotlib.use("Agg")  # headless / CI-safe backend
-from matplotlib import pyplot as plt  # noqa: E402  pylint: disable=wrong-import-position
-
-from audio_validation.continous_validation.models import ChunkMetrics
+# pylint: disable=wrong-import-order, wrong-import-position
+from matplotlib import (
+    pyplot as plt,
+)
 
 logger = logging.getLogger(__name__)
 

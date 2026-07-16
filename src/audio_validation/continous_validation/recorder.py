@@ -16,7 +16,8 @@ import numpy as np
 class Recorder(Protocol):
     """Streaming capture source.
 
-    Implementations must  return **contiguous** samples across consecutive :meth:`read_capture` calls.
+    Implementations must  return **contiguous** samples across
+    consecutive :meth:`read_capture` calls.
     """
 
     def start_capture(self) -> None:
