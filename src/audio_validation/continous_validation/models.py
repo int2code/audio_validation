@@ -60,6 +60,17 @@ class FailureInfo:
     reason: str
     wav_offset_s: float
 
+    def __str__(self) -> str:
+        """Return a human-readable, multiline failure summary."""
+        return (
+            "FailureInfo:\n"
+            f"  chunk_index: {self.chunk_index}\n"
+            f"  time_s: {self.time_s}\n"
+            f"  wav_offset_s: {self.wav_offset_s}\n"
+            "  reason:\n"
+            f"{self.reason}"
+        )
+
 
 @dataclass
 class ValidationResult:  # pylint: disable=too-many-instance-attributes

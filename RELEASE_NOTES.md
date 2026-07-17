@@ -1,3 +1,7 @@
+### 0.3.1
+
+[PATCH] Fix printing Continous Audio Validator Failure Info.
+
 ### 0.3.0
 
 [MINOR] Add Continous Audio Validator.
