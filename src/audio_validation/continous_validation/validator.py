@@ -343,14 +343,15 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             chunk.start_s,
             chunk.end_s,
         )
-        ok, reason = evaluate_chunk(features, criteria)
+        verdict = evaluate_chunk(features, criteria)
 
         metric = ChunkMetrics(
             index=chunk.index,
             start_s=chunk.start_s,
             end_s=chunk.end_s,
-            ok=ok,
-            reason=reason,
+            ok=verdict.ok,
+            reason=verdict.summary,
+            detail=verdict.detail,
             channels=[
                 ChannelMetric(
                     rms=feat.rms,
@@ -372,7 +373,7 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
 
         self._retention.add(chunk)
 
-        if ok:
+        if verdict.ok:
             self._consec_fail = 0
             return
         if not self._cfg.stop_on_failure:
@@ -387,7 +388,7 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
                 self._failure_info = FailureInfo(
                     chunk_index=chunk.index,
                     time_s=chunk.start_s,
-                    reason=reason,
+                    reason=verdict.detail,
                     wav_offset_s=0.0,  # will be updated when wav is written
                 )
                 first = True

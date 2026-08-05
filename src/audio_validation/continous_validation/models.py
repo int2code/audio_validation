@@ -5,6 +5,7 @@ short-lived (only referenced by the bounded retention buffer).
 """
 
 from dataclasses import dataclass, field
+from textwrap import indent
 from typing import List, Optional
 
 import numpy as np
@@ -41,13 +42,19 @@ class ChannelMetric:
 
 @dataclass
 class ChunkMetrics:
-    """Per-chunk analysis result: timing, verdict and per-channel metrics."""
+    """Per-chunk analysis result: timing, verdict and per-channel metrics.
+
+    :ivar reason: Single-line failure summary, suited to a table column.
+    :ivar detail: Multiline failure report with the per-check channel tables;
+        never put this in a DataFrame cell, log it separately.
+    """
 
     index: int
     start_s: float
     end_s: float
     ok: bool
     reason: str
+    detail: str = ""
     channels: List[ChannelMetric] = field(default_factory=list)
 
 
@@ -68,7 +75,7 @@ class FailureInfo:
             f"  time_s: {self.time_s}\n"
             f"  wav_offset_s: {self.wav_offset_s}\n"
             "  reason:\n"
-            f"{self.reason}"
+            f"{indent(self.reason, '    ')}"
         )
 
 
@@ -94,7 +101,12 @@ class ValidationResult:  # pylint: disable=too-many-instance-attributes
     plot_path: Optional[str] = None
 
     def metrics_dataframe(self) -> pd.DataFrame:
-        """Flatten the metrics timeline to one row per (chunk, channel)."""
+        """Flatten the metrics timeline to one row per (chunk, channel).
+
+        The ``reason`` column holds only the single-line failure summary; the
+        per-check channel tables live in :meth:`failure_details`, because a
+        multiline table crammed into one cell wrecks the table layout.
+        """
         rows = []
         for metric in self.metrics:
             for ch_idx, ch_mertric in enumerate(metric.channels):
@@ -103,13 +115,27 @@ class ValidationResult:  # pylint: disable=too-many-instance-attributes
                         "index": metric.index,
                         "start_s": metric.start_s,
                         "end_s": metric.end_s,
-                        "ok": metric.ok,
-                        "reason": metric.reason,
                         "ch": ch_idx,
                         "rms": ch_mertric.rms,
                         "thd": ch_mertric.thd,
                         "thd_n": ch_mertric.thd_n,
                         "detected": ch_mertric.detected,
+                        "ok": metric.ok,
+                        "reason": metric.reason,
                     }
                 )
         return pd.DataFrame(rows)
+
+    def failure_details(self) -> str:
+        """Render the multiline failure report of every failing chunk.
+
+        One block per failing chunk, each with the per-check channel tables
+        produced by the criteria checks. Empty when no chunk failed.
+        """
+        blocks = [
+            f"chunk {metric.index} (t={metric.start_s:.1f}-{metric.end_s:.1f}s):\n"
+            f"{indent(metric.detail or metric.reason, '  ')}"
+            for metric in self.metrics
+            if not metric.ok
+        ]
+        return "\n".join(blocks)
