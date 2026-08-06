@@ -27,6 +27,7 @@ from scipy.io import wavfile
 from audio_validation.audio_features import AudioFeatures
 from audio_validation.continous_validation.criteria import (
     AudioCriteria,
+    ChunkVerdict,
     evaluate_chunk,
 )
 from audio_validation.continous_validation.models import (
@@ -56,8 +57,14 @@ class ValidatorConfig:
     :param max_capture_s: Capture-time limit; ``None`` means unlimited.
     :param pre_failure_s: Seconds retained before failure; ``None`` keeps all.
     :param post_failure_s: Seconds retained/captured after a failure.
-    :param stop_on_failure: Stop the run on the first armed failure.
+    :param stop_on_failure: Stop the run on the first armed failure. When
+        ``False`` the run continues to completion but the failure is still
+        reported in :attr:`ValidationResult.failure`.
     :param failure_consecutive: Consecutive failing chunks required to report run failure.
+    :param warmup_chunks: Leading chunks whose features are computed and recorded
+        but not evaluated. Covers playback start-up, where the signal is still
+        ramping and THD / RMS are meaningless — especially with a small
+        ``chunk_s``, where the ramp fills a whole chunk.
     :param artifacts_dir: Directory for persisted artifacts (for example WAV).
     :param wav_filename: Saved WAV filename.
     :param wav_dtype: Retained/saved sample dtype.
@@ -74,6 +81,7 @@ class ValidatorConfig:
     post_failure_s: int = 60
     stop_on_failure: bool = True
     failure_consecutive: int = 1
+    warmup_chunks: int = 0
     artifacts_dir: str = "test_artifacts"
     wav_filename: str = "continuous_capture.wav"
     wav_dtype: str = "float32"
@@ -323,7 +331,12 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             self._abort.set()
 
     def _validate_chunk_features(self, chunk: RawChunk) -> None:
-        """Compute features for *chunk*, evaluate criteria, and arm on failure."""
+        """Compute features for *chunk*, evaluate criteria, and arm on failure.
+
+        Warm-up chunks still get their features computed and recorded — they
+        belong in the metrics table and the WAV — but no check is run against
+        them, so they can neither fail the run nor break a failing streak.
+        """
         with self._state_lock:
             criteria = self._criteria
 
@@ -337,20 +350,16 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             skip_latency=chunk.index == 0,
             activity_threshold=criteria.silence_rms_threshold,
         )
-        logger.debug(
-            "Evaluating chunk %d: start=%.1fs end=%.1fs",
-            chunk.index,
-            chunk.start_s,
-            chunk.end_s,
-        )
-        ok, reason = evaluate_chunk(features, criteria)
+        warmup = chunk.index < self._cfg.warmup_chunks
+        verdict = ChunkVerdict() if warmup else evaluate_chunk(features, criteria)
 
         metric = ChunkMetrics(
             index=chunk.index,
             start_s=chunk.start_s,
             end_s=chunk.end_s,
-            ok=ok,
-            reason=reason,
+            ok=verdict.ok,
+            reason="warm-up (not evaluated)" if warmup else verdict.summary,
+            detail=verdict.detail,
             channels=[
                 ChannelMetric(
                     rms=feat.rms,
@@ -372,26 +381,27 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
 
         self._retention.add(chunk)
 
-        if ok:
+        if verdict.ok:
             self._consec_fail = 0
-            return
-        if not self._cfg.stop_on_failure:
             return
         self._consec_fail += 1
         if self._consec_fail < self._cfg.failure_consecutive:
             return
-        first = False
+        arm_stop = False
         with self._state_lock:
-            if self._failure_time_s is None:
-                self._failure_time_s = chunk.end_s
+            if self._failure_info is None:
                 self._failure_info = FailureInfo(
                     chunk_index=chunk.index,
                     time_s=chunk.start_s,
-                    reason=reason,
+                    reason=verdict.detail,
                     wav_offset_s=0.0,  # will be updated when wav is written
                 )
-                first = True
-        if first:
+            # ``_failure_time_s`` arms the run teardown (reader break + retention
+            # freeze), so it is only set when the run is meant to stop.
+            if self._cfg.stop_on_failure and self._failure_time_s is None:
+                self._failure_time_s = chunk.end_s
+                arm_stop = True
+        if arm_stop:
             self._retention.freeze(chunk.end_s)
 
     # Finalising the run and assembling the result ------------------------------------------------
@@ -463,12 +473,20 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             error = self._error
             metrics = list(self._metrics)
 
-        if failure is not None and wav_start is not None:
+        # Without ``stop_on_failure`` the retention window keeps rolling, so the
+        # failing chunk may have been evicted before the WAV was written.
+        failure_in_wav = (
+            failure is not None
+            and wav_start is not None
+            and wav_end is not None
+            and wav_start <= failure.time_s <= wav_end
+        )
+        if failure_in_wav:
             failure = replace(failure, wav_offset_s=failure.time_s - wav_start)
 
         if error is not None:
             stopped_reason = "capture_error"
-        elif failure is not None:
+        elif failure is not None and self._cfg.stop_on_failure:
             stopped_reason = "failure"
         elif self._stop_requested:
             stopped_reason = "stopped"
@@ -484,8 +502,12 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
                 (
                     f"; failure at t={failure.time_s:.1f}s = "
                     f"{failure.wav_offset_s:.1f}s into WAV."
-                    if failure is not None
-                    else "."
+                    if failure_in_wav
+                    else (
+                        f"; failure at t={failure.time_s:.1f}s is outside the WAV."
+                        if failure is not None
+                        else "."
+                    )
                 ),
             )
 

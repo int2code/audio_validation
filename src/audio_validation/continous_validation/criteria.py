@@ -6,10 +6,14 @@ swapped atomically by reference while the analysis thread reads it, without
 copying.  :func:`evaluate_chunk` runs every configured check (skipping any left
 at ``None``) and reports *all* failures, each check living in its own function
 that logs a per-channel table.
+
+Each check returns a :class:`CheckResult` that keeps its one-line *summary*
+separate from its per-channel *failures* table, so callers can render a compact
+overview (one row per chunk) without embedding a whole table in a single cell.
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional, Tuple
 
 import numpy as np
@@ -60,6 +64,74 @@ class AudioCriteria:
     custom_check: Optional[Callable[[AudioFeatures], Tuple[bool, str]]] = None
 
 
+@dataclass(frozen=True)
+class CheckResult:
+    """Outcome of a single check.
+
+    Keeping *summary* (one line) apart from *failures* (a table) lets the caller
+    choose the rendering: a compact column in a metrics table, or a full
+    multiline block in a failure report.
+
+    :ivar name: Short check identifier, e.g. ``"thd_n"``.
+    :ivar ok: Whether the check passed.
+    :ivar summary: Single-line reason; empty when the check passed.
+    :ivar failures: Failing per-channel rows, or ``None`` when not applicable.
+    """
+
+    name: str
+    ok: bool
+    summary: str = ""
+    failures: Optional[pd.DataFrame] = None
+
+    @classmethod
+    def from_tuple(cls, name: str, result: Tuple[bool, str]) -> "CheckResult":
+        """Adapt a legacy ``(ok, reason)`` pair (e.g. from ``custom_check``).
+
+        A multiline *reason* keeps its first line as the summary; the rest is
+        preserved as a single-column details table.
+        """
+        ok, reason = result
+        head, _, rest = reason.partition("\n")
+        failures = pd.DataFrame({"detail": rest.splitlines()}) if rest.strip() else None
+        return cls(name=name, ok=ok, summary=head, failures=failures)
+
+    @property
+    def detail(self) -> str:
+        """Return the multiline ``summary`` + failing-rows table."""
+        if self.ok:
+            return ""
+        if self.failures is None or self.failures.empty:
+            return self.summary
+        return f"{self.summary}\n{self.failures.to_string()}"
+
+
+@dataclass(frozen=True)
+class ChunkVerdict:
+    """Aggregated outcome of every check run against one chunk."""
+
+    results: List[CheckResult] = field(default_factory=list)
+
+    @property
+    def failures(self) -> List[CheckResult]:
+        """Return the failing checks, in evaluation order."""
+        return [result for result in self.results if not result.ok]
+
+    @property
+    def ok(self) -> bool:
+        """Whether every check passed."""
+        return not self.failures
+
+    @property
+    def summary(self) -> str:
+        """Single-line reason joining every failing check's summary."""
+        return "; ".join(result.summary for result in self.failures)
+
+    @property
+    def detail(self) -> str:
+        """Multiline reason with each failing check's per-channel table."""
+        return "\n".join(result.detail for result in self.failures)
+
+
 def _channel_label(ch: int) -> str:
     """Return a stable, human-readable label for channel index *ch*."""
     return f"ch{ch}"
@@ -87,13 +159,13 @@ def _format_list(freqs: Any, max_display: int = 5) -> str:
     )
 
 
-def check_silence(features: AudioFeatures, threshold: float) -> Tuple[bool, str]:
+def check_silence(features: AudioFeatures, threshold: float) -> CheckResult:
     """Check that every channel is silent (RMS at/below *threshold*).
 
     :param features: Per-channel features to check.
     :param threshold: RMS at/below which a channel counts as silent.
-    :return: ``(True, "")`` if all channels are silent, else ``(False, reason)``
-        naming the non-silent channels.
+    :return: A passing :class:`CheckResult`, or a failing one carrying the
+        non-silent channels.
     """
     rows = [
         {
@@ -104,18 +176,20 @@ def check_silence(features: AudioFeatures, threshold: float) -> Tuple[bool, str]
         for ch, feat in enumerate(features.channel_features)
     ]
     df = pd.DataFrame(rows).set_index("ch")
-    logger.debug("Silence check:\n%s", df.to_string())
 
     non_silent_df = df[~df["silent"]]
     if non_silent_df.empty:
-        return True, ""
-    return False, (
+        return CheckResult("silence", True)
+    return CheckResult(
+        "silence",
+        False,
         f"Expected silence (RMS <= {threshold}) but audio detected on "
-        f"{len(non_silent_df)} channel(s).\n{non_silent_df.to_string()}"
+        f"{len(non_silent_df)} channel(s)",
+        non_silent_df,
     )
 
 
-def check_audio_present(features: AudioFeatures, threshold: float) -> Tuple[bool, str]:
+def check_audio_present(features: AudioFeatures, threshold: float) -> CheckResult:
     """Check that every channel carries audio (RMS strictly above *threshold*).
 
     Complement of :func:`check_silence`; mirrors the legacy
@@ -123,8 +197,8 @@ def check_audio_present(features: AudioFeatures, threshold: float) -> Tuple[bool
 
     :param features: Per-channel features to check.
     :param threshold: RMS strictly above which a channel counts as present.
-    :return: ``(True, "")`` if all channels are present, else ``(False, reason)``
-        naming the silent channels.
+    :return: A passing :class:`CheckResult`, or a failing one carrying the
+        silent channels.
     """
     rows = [
         {
@@ -135,27 +209,28 @@ def check_audio_present(features: AudioFeatures, threshold: float) -> Tuple[bool
         for ch, feat in enumerate(features.channel_features)
     ]
     df = pd.DataFrame(rows).set_index("ch")
-    logger.debug("Audio presence check:\n%s", df.to_string())
 
     silent_df = df[~df["audio_present"]]
     if silent_df.empty:
-        return True, ""
-    return False, (
-        f"No audio detected (RMS <= {threshold}) on {len(silent_df)} channel(s).\n"
-        f"{silent_df.to_string()}"
+        return CheckResult("audio_present", True)
+    return CheckResult(
+        "audio_present",
+        False,
+        f"No audio detected (RMS <= {threshold}) on {len(silent_df)} channel(s)",
+        silent_df,
     )
 
 
 def check_rms(
     features: AudioFeatures, expected_rms: List[float], tolerance: float
-) -> Tuple[bool, str]:
+) -> CheckResult:
     """Check that each channel's RMS is within *tolerance* of its expected value.
 
     :param features: Per-channel features to check.
     :param expected_rms: Per-channel expected RMS values.
     :param tolerance: Allowed absolute deviation from *expected_rms*.
-    :return: ``(True, "")`` if all channels are in tolerance, else
-        ``(False, reason)`` naming the out-of-tolerance channels.
+    :return: A passing :class:`CheckResult`, or a failing one carrying the
+        out-of-tolerance channels.
     """
     rows = [
         {
@@ -168,23 +243,25 @@ def check_rms(
         for ch, feat in enumerate(features.channel_features)
     ]
     df = pd.DataFrame(rows).set_index("ch")
-    logger.debug("RMS check:\n%s", df.to_string())
 
     failed_df = df[~df["rms_ok"]]
     if failed_df.empty:
-        return True, ""
-    return False, (
-        f"RMS out of tolerance on {len(failed_df)} channel(s).\n{failed_df.to_string()}"
+        return CheckResult("rms", True)
+    return CheckResult(
+        "rms",
+        False,
+        f"RMS out of tolerance on {len(failed_df)} channel(s)",
+        failed_df,
     )
 
 
-def check_frequency(features: AudioFeatures) -> Tuple[bool, str]:
+def check_frequency(features: AudioFeatures) -> CheckResult:
     """Check that the expected frequency was detected on every channel.
 
     :param features: Per-channel features to check (``detected`` set by the
         FFT stage of :meth:`AudioFeatures.compute`).
-    :return: ``(True, "")`` if detected on all channels, else ``(False, reason)``
-        naming the channels that missed the expected frequency.
+    :return: A passing :class:`CheckResult`, or a failing one carrying the
+        channels that missed the expected frequency.
     """
     rows = [
         {
@@ -202,26 +279,27 @@ def check_frequency(features: AudioFeatures) -> Tuple[bool, str]:
         for ch, feat in enumerate(features.channel_features)
     ]
     df = pd.DataFrame(rows).set_index("ch")
-    logger.debug("Frequency presence check:\n%s", df.to_string())
 
     failed_df = df[~df["detected"]]
     if failed_df.empty:
-        return True, ""
-    return False, (
-        f"Expected frequency not detected on {len(failed_df)} channel(s).\n"
-        f"{failed_df.to_string()}"
+        return CheckResult("frequency", True)
+    return CheckResult(
+        "frequency",
+        False,
+        f"Expected frequency not detected on {len(failed_df)} channel(s)",
+        failed_df,
     )
 
 
-def check_thd(features: AudioFeatures, max_thd: float) -> Tuple[bool, str]:
+def check_thd(features: AudioFeatures, max_thd: float) -> CheckResult:
     """Check that each channel's THD is at/below *max_thd* percent.
 
     Channels with THD not computed (``None``) are treated as passing.
 
     :param features: Per-channel features to check.
     :param max_thd: Maximum allowed THD as a percentage.
-    :return: ``(True, "")`` if all channels are within tolerance, else
-        ``(False, reason)`` naming the channels above tolerance.
+    :return: A passing :class:`CheckResult`, or a failing one carrying the
+        channels above tolerance.
     """
     rows = [
         {
@@ -233,18 +311,19 @@ def check_thd(features: AudioFeatures, max_thd: float) -> Tuple[bool, str]:
         for ch, feat in enumerate(features.channel_features)
     ]
     df = pd.DataFrame(rows).set_index("ch")
-    logger.debug("THD check:\n%s", df.to_string())
 
     failed_df = df[~df["thd_ok"]]
     if failed_df.empty:
-        return True, ""
-    return False, (
-        f"THD above tolerance ({max_thd} %) on {len(failed_df)} channel(s).\n"
-        f"{failed_df.to_string()}"
+        return CheckResult("thd", True)
+    return CheckResult(
+        "thd",
+        False,
+        f"THD above tolerance ({max_thd} %) on {len(failed_df)} channel(s)",
+        failed_df,
     )
 
 
-def check_thd_n(features: AudioFeatures, max_thd_n: float) -> Tuple[bool, str]:
+def check_thd_n(features: AudioFeatures, max_thd_n: float) -> CheckResult:
     """Check that each channel's THD+N is at/below *max_thd_n* percent.
 
     THD+N accounts for broadband noise as well as harmonics, so it catches a
@@ -253,8 +332,8 @@ def check_thd_n(features: AudioFeatures, max_thd_n: float) -> Tuple[bool, str]:
 
     :param features: Per-channel features to check.
     :param max_thd_n: Maximum allowed THD+N as a percentage.
-    :return: ``(True, "")`` if all channels are within tolerance, else
-        ``(False, reason)`` naming the channels above tolerance.
+    :return: A passing :class:`CheckResult`, or a failing one carrying the
+        channels above tolerance.
     """
     rows = [
         {
@@ -266,33 +345,31 @@ def check_thd_n(features: AudioFeatures, max_thd_n: float) -> Tuple[bool, str]:
         for ch, feat in enumerate(features.channel_features)
     ]
     df = pd.DataFrame(rows).set_index("ch")
-    logger.debug("THD+N check:\n%s", df.to_string())
 
     failed_df = df[~df["thd_n_ok"]]
     if failed_df.empty:
-        return True, ""
-    return False, (
-        f"THD+N above tolerance ({max_thd_n} %) on {len(failed_df)} channel(s).\n"
-        f"{failed_df.to_string()}"
+        return CheckResult("thd_n", True)
+    return CheckResult(
+        "thd_n",
+        False,
+        f"THD+N above tolerance ({max_thd_n} %) on {len(failed_df)} channel(s)",
+        failed_df,
     )
 
 
-def evaluate_chunk(
-    features: AudioFeatures, criteria: AudioCriteria
-) -> Tuple[bool, str]:
+def evaluate_chunk(features: AudioFeatures, criteria: AudioCriteria) -> ChunkVerdict:
     """Evaluate one chunk's features against every configured check.
 
     Unlike a short-circuiting check, this runs *all* checks enabled by
-    *criteria* and aggregates the reasons of every failing one, so a single
-    chunk reports all its problems at once.
+    *criteria* and collects every result, so a single chunk reports all its
+    problems at once.
 
     :param features: Per-channel features from :meth:`AudioFeatures.compute`.
     :param criteria: Active criteria snapshot.
-    :return: ``(True, "")`` if every configured check passes, otherwise
-        ``(False, reason)`` where *reason* joins the reason of each failing
-        check (one per line).
+    :return: A :class:`ChunkVerdict` holding each executed check's result;
+        ``verdict.ok`` is ``True`` when every configured check passed.
     """
-    results: List[Tuple[bool, str]] = []
+    results: List[CheckResult] = []
 
     if criteria.require_audio_present:
         results.append(check_audio_present(features, criteria.silence_rms_threshold))
@@ -309,9 +386,8 @@ def evaluate_chunk(
     if criteria.max_thd_n is not None:
         results.append(check_thd_n(features, criteria.max_thd_n))
     if criteria.custom_check is not None:
-        results.append(criteria.custom_check(features))
+        results.append(
+            CheckResult.from_tuple("custom", criteria.custom_check(features))
+        )
 
-    failures = [reason for ok, reason in results if not ok]
-    if failures:
-        return False, "\n".join(failures)
-    return True, ""
+    return ChunkVerdict(results)
