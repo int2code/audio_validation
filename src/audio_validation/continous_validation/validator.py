@@ -27,6 +27,7 @@ from scipy.io import wavfile
 from audio_validation.audio_features import AudioFeatures
 from audio_validation.continous_validation.criteria import (
     AudioCriteria,
+    ChunkVerdict,
     evaluate_chunk,
 )
 from audio_validation.continous_validation.models import (
@@ -60,6 +61,10 @@ class ValidatorConfig:
         ``False`` the run continues to completion but the failure is still
         reported in :attr:`ValidationResult.failure`.
     :param failure_consecutive: Consecutive failing chunks required to report run failure.
+    :param warmup_chunks: Leading chunks whose features are computed and recorded
+        but not evaluated. Covers playback start-up, where the signal is still
+        ramping and THD / RMS are meaningless — especially with a small
+        ``chunk_s``, where the ramp fills a whole chunk.
     :param artifacts_dir: Directory for persisted artifacts (for example WAV).
     :param wav_filename: Saved WAV filename.
     :param wav_dtype: Retained/saved sample dtype.
@@ -76,6 +81,7 @@ class ValidatorConfig:
     post_failure_s: int = 60
     stop_on_failure: bool = True
     failure_consecutive: int = 1
+    warmup_chunks: int = 0
     artifacts_dir: str = "test_artifacts"
     wav_filename: str = "continuous_capture.wav"
     wav_dtype: str = "float32"
@@ -325,7 +331,12 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             self._abort.set()
 
     def _validate_chunk_features(self, chunk: RawChunk) -> None:
-        """Compute features for *chunk*, evaluate criteria, and arm on failure."""
+        """Compute features for *chunk*, evaluate criteria, and arm on failure.
+
+        Warm-up chunks still get their features computed and recorded — they
+        belong in the metrics table and the WAV — but no check is run against
+        them, so they can neither fail the run nor break a failing streak.
+        """
         with self._state_lock:
             criteria = self._criteria
 
@@ -339,14 +350,15 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             skip_latency=chunk.index == 0,
             activity_threshold=criteria.silence_rms_threshold,
         )
-        verdict = evaluate_chunk(features, criteria)
+        warmup = chunk.index < self._cfg.warmup_chunks
+        verdict = ChunkVerdict() if warmup else evaluate_chunk(features, criteria)
 
         metric = ChunkMetrics(
             index=chunk.index,
             start_s=chunk.start_s,
             end_s=chunk.end_s,
             ok=verdict.ok,
-            reason=verdict.summary,
+            reason="warm-up (not evaluated)" if warmup else verdict.summary,
             detail=verdict.detail,
             channels=[
                 ChannelMetric(
