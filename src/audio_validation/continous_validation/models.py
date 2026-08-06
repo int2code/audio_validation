@@ -12,6 +12,22 @@ import numpy as np
 import pandas as pd
 
 
+def format_timestamp(seconds: float) -> str:
+    """Render *seconds* since capture start as ``HH:MM:SS.mmm``.
+
+    Chunk boundaries are far easier to line up with a long run's wall clock as
+    ``00:15:04.023`` than as ``904.023``. Hours are not wrapped at 24.
+
+    :param seconds: Offset from capture start in seconds.
+    :return: Zero-padded ``HH:MM:SS.mmm`` string.
+    """
+    millis = round(seconds * 1000)
+    hours, millis = divmod(millis, 3_600_000)
+    minutes, millis = divmod(millis, 60_000)
+    secs, millis = divmod(millis, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
+
+
 @dataclass
 class RawChunk:
     """One contiguous captured block, tagged with its position in the run.
@@ -106,6 +122,9 @@ class ValidationResult:  # pylint: disable=too-many-instance-attributes
         The ``reason`` column holds only the single-line failure summary; the
         per-check channel tables live in :meth:`failure_details`, because a
         multiline table crammed into one cell wrecks the table layout.
+
+        ``start``/``end`` are rendered as ``HH:MM:SS.mmm`` offsets from capture
+        start rather than raw seconds.
         """
         rows = []
         for metric in self.metrics:
@@ -113,8 +132,8 @@ class ValidationResult:  # pylint: disable=too-many-instance-attributes
                 rows.append(
                     {
                         "index": metric.index,
-                        "start_s": metric.start_s,
-                        "end_s": metric.end_s,
+                        "start": format_timestamp(metric.start_s),
+                        "end": format_timestamp(metric.end_s),
                         "ch": ch_idx,
                         "rms": ch_mertric.rms,
                         "thd": ch_mertric.thd,
