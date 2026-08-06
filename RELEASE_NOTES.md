@@ -1,3 +1,7 @@
+### 0.3.2
+
+[PATCH] Add warmup chunks, improve failure reporting.
+
 ### 0.3.1
 
 [PATCH] Fix printing Continous Audio Validator Failure Info.
