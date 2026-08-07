@@ -1,3 +1,7 @@
+### 0.3.3
+
+[PATCH] Add absolute timestamps in audio chunks.
+
 ### 0.3.2
 
 [PATCH] Add warmup chunks, improve failure reporting.

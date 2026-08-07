@@ -5,11 +5,14 @@ short-lived (only referenced by the bounded retention buffer).
 """
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from textwrap import indent
 from typing import List, Optional
 
 import numpy as np
 import pandas as pd
+
+WALL_CLOCK_UNKNOWN = "-"
 
 
 def format_timestamp(seconds: float) -> str:
@@ -28,6 +31,18 @@ def format_timestamp(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d}.{millis:03d}"
 
 
+def format_wall_clock(timestamp: Optional[datetime]) -> str:
+    """Render an absolute chunk timestamp as ``YYYY-MM-DD HH:MM:SS.mmm``.
+
+    :param timestamp: Absolute chunk time, or ``None`` when not recorded.
+    :return: Millisecond-precision timestamp, or ``"-"`` when *timestamp* is
+        ``None``.
+    """
+    if timestamp is None:
+        return WALL_CLOCK_UNKNOWN
+    return timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
 @dataclass
 class RawChunk:
     """One contiguous captured block, tagged with its position in the run.
@@ -36,12 +51,15 @@ class RawChunk:
     :ivar start_s: Start time in seconds relative to capture start.
     :ivar end_s: End time in seconds relative to capture start.
     :ivar samples: 2-D array ``(n_samples, channels)``.
+    :ivar start_timestamp: Absolute wall-clock time of the chunk's first sample,
+        or ``None`` when the capture start time is unknown.
     """
 
     index: int
     start_s: float
     end_s: float
     samples: np.ndarray
+    start_timestamp: Optional[datetime] = None
 
 
 @dataclass
@@ -63,6 +81,8 @@ class ChunkMetrics:
     :ivar reason: Single-line failure summary, suited to a table column.
     :ivar detail: Multiline failure report with the per-check channel tables;
         never put this in a DataFrame cell, log it separately.
+    :ivar start_timestamp: Absolute wall-clock time of the chunk's first sample,
+        or ``None`` when the capture start time is unknown.
     """
 
     index: int
@@ -72,6 +92,7 @@ class ChunkMetrics:
     reason: str
     detail: str = ""
     channels: List[ChannelMetric] = field(default_factory=list)
+    start_timestamp: Optional[datetime] = None
 
 
 @dataclass
@@ -124,7 +145,8 @@ class ValidationResult:  # pylint: disable=too-many-instance-attributes
         multiline table crammed into one cell wrecks the table layout.
 
         ``start``/``end`` are rendered as ``HH:MM:SS.mmm`` offsets from capture
-        start rather than raw seconds.
+        start rather than raw seconds; ``timestamp`` is the absolute wall-clock
+        time of the chunk's first sample, for lining chunks up with DUT logs.
         """
         rows = []
         for metric in self.metrics:
@@ -132,6 +154,7 @@ class ValidationResult:  # pylint: disable=too-many-instance-attributes
                 rows.append(
                     {
                         "index": metric.index,
+                        "timestamp": format_wall_clock(metric.start_timestamp),
                         "start": format_timestamp(metric.start_s),
                         "end": format_timestamp(metric.end_s),
                         "ch": ch_idx,

@@ -19,6 +19,7 @@ import threading
 from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 import time
 from typing import Callable, List, Optional
 
@@ -149,6 +150,7 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
         self._error: Optional[str] = None
 
         self._captured_time_s = 0.0
+        self._capture_started_at: Optional[datetime] = None
         self._consec_fail = 0
         self._stop_requested = False
         self._play_stopped = False
@@ -258,6 +260,17 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             except Exception:  # pylint: disable=broad-except
                 logger.exception("recorder.stop_capture() raised")
 
+    def _chunk_timestamp(self, chunk_start_s: float) -> Optional[datetime]:
+        """Return the absolute time of a chunk starting *chunk_start_s* into the run.
+        Chunk timestamps are derived from capture start plus the sample-count offset,
+
+        :param chunk_start_s: Chunk start offset from capture start, in seconds.
+        :return: Wall-clock chunk start, or ``None`` before capture started.
+        """
+        if self._capture_started_at is None:
+            return None
+        return self._capture_started_at + timedelta(seconds=chunk_start_s)
+
     def _read_chunks(self) -> None:
         """
         Read chunks from the recorder and put them into the queue.
@@ -266,6 +279,7 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
         total_samples = 0
         try:
             self._recorder.start_capture()
+            self._capture_started_at = datetime.now()
             while not self._stop.is_set() and not self._abort.is_set():
 
                 if (
@@ -293,7 +307,13 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
                 chunk_end_s = total_samples / self._sample_rate
                 self._captured_time_s = chunk_end_s
                 self._enqueue_chunk(
-                    RawChunk(chunk_idx, chunk_start_s, chunk_end_s, chunk)
+                    RawChunk(
+                        chunk_idx,
+                        chunk_start_s,
+                        chunk_end_s,
+                        chunk,
+                        self._chunk_timestamp(chunk_start_s),
+                    )
                 )
                 chunk_idx += 1
         except Exception as exc:  # pylint: disable=broad-except
@@ -357,6 +377,7 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             index=chunk.index,
             start_s=chunk.start_s,
             end_s=chunk.end_s,
+            start_timestamp=chunk.start_timestamp,
             ok=verdict.ok,
             reason="warm-up (not evaluated)" if warmup else verdict.summary,
             detail=verdict.detail,
