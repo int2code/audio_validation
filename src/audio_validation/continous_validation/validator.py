@@ -20,7 +20,6 @@ from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from concurrent.futures import wait as futures_wait
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-import time
 from typing import Callable, List, Optional
 
 from scipy.io import wavfile
@@ -151,6 +150,10 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
 
         self._captured_time_s = 0.0
         self._capture_started_at: Optional[datetime] = None
+        self._chunks_read = 0
+        self._skip_from_index = 0
+        self._skip_until_index: Optional[int] = None
+        self._pending_criteria: Optional[AudioCriteria] = None
         self._consec_fail = 0
         self._stop_requested = False
         self._play_stopped = False
@@ -182,19 +185,57 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
         empty_criteria = AudioCriteria()  # no check is performed
         self.update_criteria(empty_criteria)
 
+    def skip_chunks(
+        self, skip_chunks: int, criteria: Optional[AudioCriteria] = None
+    ) -> int:
+        """Leave the next *skip_chunks* chunks unevaluated, then swap criteria.
+
+        **Returns immediately** — the caller keeps the audio timeline running and
+        is free to disturb the DUT (install a network delay, power-cycle, change
+        volume, ...) *inside* the skip window it just opened. The window and the
+        criteria swap are honoured by the analysis worker, keyed on chunk index,
+        so a queue backlog cannot shift them.
+
+        :param skip_chunks: Number of chunks to leave unevaluated. ``0`` skips
+            nothing and applies *criteria* to the next analysed chunk.
+        :param criteria: Criteria to activate once the window has passed.
+            ``None`` keeps the active criteria (skip only).
+        :return: Index of the first chunk that will be evaluated again.
+        """
+        with self._state_lock:
+            # The chunk being captured right now is ``_chunks_read``; the change
+            # the caller is about to make lands inside it, so it is skipped too.
+            first_skipped = self._chunks_read
+            skip_until = first_skipped + max(skip_chunks, 0)
+            if self._skip_until_index is not None:
+                # Extending an open window: keep its (earlier) lower bound.
+                first_skipped = self._skip_from_index
+                skip_until = max(skip_until, self._skip_until_index)
+            self._skip_from_index = first_skipped
+            self._skip_until_index = skip_until
+            if criteria is not None:
+                self._pending_criteria = criteria
+        swap = "; criteria swapped afterwards" if criteria is not None else ""
+        if skip_until > first_skipped:
+            logger.info(
+                "Skipping checks for chunks %d-%d%s",
+                first_skipped,
+                skip_until - 1,
+                swap,
+            )
+        else:
+            logger.info("Skipping no chunks%s", swap)
+        return skip_until
+
     def skip_check_and_update_criteria(
         self, skip_chunks: int, criteria: AudioCriteria
     ) -> None:
-        """Set the active criteria to an empty one, effectively skipping checks.
+        """Skip given number of chunks and then set the new criteria. Thread-safe.
 
-        Then update the criteria to the provided one after a short delay.
-        This is useful for skipping checks during a known transient event.
+        :param skip_chunks: Number of chunks to leave unevaluated.
+        :param criteria: Criteria to activate once the window has passed.
         """
-        self.set_empty_criteria()
-        time.sleep(
-            skip_chunks * self._cfg.chunk_s
-        )  # skip the specified number of chunks
-        self.update_criteria(criteria)
+        self.skip_chunks(skip_chunks, criteria)
 
     def snapshot_metrics(self) -> List[ChunkMetrics]:
         """Return a copy of the metrics timeline collected so far."""
@@ -316,6 +357,8 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
                     )
                 )
                 chunk_idx += 1
+                with self._state_lock:
+                    self._chunks_read = chunk_idx
         except Exception as exc:  # pylint: disable=broad-except
             with self._state_lock:
                 self._error = f"{type(exc).__name__}: {exc}"
@@ -350,15 +393,48 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
         finally:
             self._abort.set()
 
+    def _criteria_for_chunk(self, chunk_index: int) -> tuple[AudioCriteria, bool]:
+        """Resolve the criteria to use for *chunk_index* and whether to skip it.
+
+        Closes a :meth:`skip_chunks` window and applies its deferred criteria as
+        soon as a chunk from beyond the window arrives.
+
+        The window is bounded on both sides: chunks already queued when
+        :meth:`skip_chunks` was called before the caller's change, so they are
+        still evaluated against the criteria that were active while they were
+        captured.
+
+        :param chunk_index: Index of the chunk about to be analysed.
+        :return: Tuple of the active criteria and whether the chunk is inside a
+            skip window (features computed, no checks run).
+        """
+        applied = False
+        with self._state_lock:
+            if self._skip_until_index is None:
+                return self._criteria, False
+            if chunk_index < self._skip_until_index:
+                return self._criteria, chunk_index >= self._skip_from_index
+            self._skip_until_index = None
+            if self._pending_criteria is not None:
+                self._criteria = self._pending_criteria
+                self._pending_criteria = None
+                applied = True
+            criteria = self._criteria
+        if applied:
+            logger.info(
+                "Skip window over, new criteria active from chunk %d", chunk_index
+            )
+        return criteria, False
+
     def _validate_chunk_features(self, chunk: RawChunk) -> None:
         """Compute features for *chunk*, evaluate criteria, and arm on failure.
 
-        Warm-up chunks still get their features computed and recorded — they
-        belong in the metrics table and the WAV — but no check is run against
-        them, so they can neither fail the run nor break a failing streak.
+        Warm-up chunks and chunks inside a :meth:`skip_chunks` window still get
+        their features computed and recorded — they belong in the metrics table
+        and the WAV — but no check is run against them, so they can neither fail
+        the run nor break a failing streak.
         """
-        with self._state_lock:
-            criteria = self._criteria
+        criteria, skipped = self._criteria_for_chunk(chunk.index)
 
         use_fft = criteria.expected_frequencies is not None
         features = AudioFeatures.compute(
@@ -371,7 +447,15 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             activity_threshold=criteria.silence_rms_threshold,
         )
         warmup = chunk.index < self._cfg.warmup_chunks
-        verdict = ChunkVerdict() if warmup else evaluate_chunk(features, criteria)
+        if warmup:
+            not_evaluated = "warm-up (not evaluated)"
+        elif skipped:
+            not_evaluated = "skipped (criteria transition)"
+        else:
+            not_evaluated = ""
+        verdict = (
+            ChunkVerdict() if not_evaluated else evaluate_chunk(features, criteria)
+        )
 
         metric = ChunkMetrics(
             index=chunk.index,
@@ -379,7 +463,7 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             end_s=chunk.end_s,
             start_timestamp=chunk.start_timestamp,
             ok=verdict.ok,
-            reason="warm-up (not evaluated)" if warmup else verdict.summary,
+            reason=not_evaluated or verdict.summary,
             detail=verdict.detail,
             channels=[
                 ChannelMetric(

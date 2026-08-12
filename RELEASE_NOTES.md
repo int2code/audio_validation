@@ -1,3 +1,7 @@
+### 0.3.4
+
+[PATCH] Add non-blocking chunk validation skip to transition conditions.
+
 ### 0.3.3
 
 [PATCH] Add absolute timestamps in audio chunks.
