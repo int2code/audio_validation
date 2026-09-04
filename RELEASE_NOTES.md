@@ -1,3 +1,7 @@
+### 0.3.6
+
+[PATCH] Skip evaluating partial chunks.
+
 ### 0.3.5
 
 [PATCH] Add saving metrics to csv file during the validation run.

@@ -447,10 +447,17 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
     def _validate_chunk_features(self, chunk: RawChunk) -> None:
         """Compute features for *chunk*, evaluate criteria, and arm on failure.
 
-        Warm-up chunks and chunks inside a :meth:`skip_chunks` window still get
-        their features computed and recorded — they belong in the metrics table
-        and the WAV — but no check is run against them, so they can neither fail
-        the run nor break a failing streak.
+        Warm-up chunks, chunks inside a :meth:`skip_chunks` window and a short
+        final chunk still get their features computed and recorded — they belong
+        in the metrics table and the WAV — but no check is run against them, so
+        they can neither fail the run nor break a failing streak.
+
+        A chunk shorter than ``chunk_s`` only happens when the capture is being
+        torn down (:meth:`Recorder.read_capture` returns short at end of
+        stream), and it cannot be measured: the FFT bins of a truncated window
+        no longer line up with the played frequencies, so leakage around the
+        fundamental is counted as harmonic energy and THD reads far above
+        tolerance on perfectly good audio.
         """
         criteria, skipped = self._criteria_for_chunk(chunk.index)
 
@@ -465,8 +472,14 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             activity_threshold=criteria.silence_rms_threshold,
         )
         warmup = chunk.index < self._cfg.warmup_chunks
+        partial = len(chunk.samples) < self._chunk_samples
         if warmup:
             not_evaluated = "warm-up (not evaluated)"
+        elif partial:
+            not_evaluated = (
+                f"partial chunk, {len(chunk.samples) / self._sample_rate:.3f}s of "
+                f"{self._cfg.chunk_s}s (capture stopping; not evaluated)"
+            )
         elif skipped:
             not_evaluated = "skipped (criteria transition)"
         else:
