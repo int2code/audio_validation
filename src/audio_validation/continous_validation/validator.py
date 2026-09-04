@@ -30,6 +30,7 @@ from audio_validation.continous_validation.criteria import (
     ChunkVerdict,
     evaluate_chunk,
 )
+from audio_validation.continous_validation.metrics_writer import MetricsCsvWriter
 from audio_validation.continous_validation.models import (
     ValidationResult,
     ChannelMetric,
@@ -71,6 +72,11 @@ class ValidatorConfig:
     :param queue_maxsize: Bounded queue size for keeping audio chunks.
     :param plot_metrics: Render a metrics-timeline plot on finalisation.
     :param plot_filename: Saved metrics-timeline plot filename.
+    :param metrics_csv_filename: Per-chunk metrics timeline, streamed to this
+        file while the run goes; ``None`` disables it. Written row by row so an
+        open-ended run neither has to render its whole timeline at the end nor
+        loses it when the session dies.
+    :param metrics_csv_flush_chunks: Flush the metrics CSV every N chunks.
     """
 
     sample_rate: int = 48000
@@ -88,6 +94,8 @@ class ValidatorConfig:
     queue_maxsize: int = 4
     plot_metrics: bool = True
     plot_filename: str = "continuous_metrics.png"
+    metrics_csv_filename: Optional[str] = "continuous_metrics.csv"
+    metrics_csv_flush_chunks: int = 60
 
 
 class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
@@ -161,6 +169,14 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
         self._result: Optional[ValidationResult] = None
         self._executor: Optional[ThreadPoolExecutor] = None
         self._futures: List[Future] = []
+        self._metrics_csv: Optional[MetricsCsvWriter] = (
+            MetricsCsvWriter(
+                os.path.join(self._cfg.artifacts_dir, self._cfg.metrics_csv_filename),
+                flush_every=self._cfg.metrics_csv_flush_chunks,
+            )
+            if self._cfg.metrics_csv_filename
+            else None
+        )
 
     # -- public API --------------------------------------------------------
     def start(self) -> None:
@@ -391,6 +407,8 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
                     self._error = f"chunk analyser {type(exc).__name__}: {exc}"
             self._stop.set()
         finally:
+            if self._metrics_csv is not None:
+                self._metrics_csv.close()
             self._abort.set()
 
     def _criteria_for_chunk(self, chunk_index: int) -> tuple[AudioCriteria, bool]:
@@ -483,6 +501,8 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
         )
         with self._state_lock:
             self._metrics.append(metric)
+        if self._metrics_csv is not None:
+            self._metrics_csv.append(metric)
 
         self._retention.add(chunk)
 
@@ -539,6 +559,12 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
                 self._executor.shutdown(wait=False)
         return self._assemble_result()
 
+    def _metrics_csv_path(self) -> Optional[str]:
+        """Path of the streamed metrics CSV, or ``None`` if nothing was written."""
+        if self._metrics_csv is None or not self._metrics_csv.written():
+            return None
+        return self._metrics_csv.path
+
     def _assemble_result(self) -> ValidationResult:
         """Build the :class:`ValidationResult` (persisting the WAV once, cached)."""
         if self.is_running:
@@ -554,6 +580,7 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
                 wav_end_s=None,
                 total_captured_s=self._captured_time_s,
                 error=error or "stop timed out: worker tasks still running",
+                metrics_csv_path=self._metrics_csv_path(),
             )
 
         if self._result is not None:
@@ -642,5 +669,6 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             total_captured_s=self._captured_time_s,
             error=error,
             plot_path=plot_path,
+            metrics_csv_path=self._metrics_csv_path(),
         )
         return self._result

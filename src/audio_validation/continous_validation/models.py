@@ -74,6 +74,7 @@ class ChannelMetric:
     failed_peaks: Optional[list]
 
 
+# pylint: disable=too-many-instance-attributes
 @dataclass
 class ChunkMetrics:
     """Per-chunk analysis result: timing, verdict and per-channel metrics.
@@ -125,6 +126,10 @@ class ValidationResult:  # pylint: disable=too-many-instance-attributes
     :ivar wav_start_s/wav_end_s: coverage of the saved WAV relative to capture
         start.
     :ivar plot_path: Path to the saved metrics-timeline plot, or ``None``.
+    :ivar metrics_csv_path: Path of the metrics timeline streamed to CSV during
+        the run, or ``None`` when it was disabled or stayed empty. It holds every
+        row :meth:`metrics_dataframe` would render, so a long run can point at
+        the file instead of materialising the timeline.
     """
 
     stopped_reason: str
@@ -136,8 +141,9 @@ class ValidationResult:  # pylint: disable=too-many-instance-attributes
     total_captured_s: float
     error: Optional[str] = None
     plot_path: Optional[str] = None
+    metrics_csv_path: Optional[str] = None
 
-    def metrics_dataframe(self) -> pd.DataFrame:
+    def metrics_dataframe(self, max_rows: Optional[int] = None) -> pd.DataFrame:
         """Flatten the metrics timeline to one row per (chunk, channel).
 
         The ``reason`` column holds only the single-line failure summary; the
@@ -147,9 +153,19 @@ class ValidationResult:  # pylint: disable=too-many-instance-attributes
         ``start``/``end`` are rendered as ``HH:MM:SS.mmm`` offsets from capture
         start rather than raw seconds; ``timestamp`` is the absolute wall-clock
         time of the chunk's first sample, for lining chunks up with DUT logs.
+
+        :param max_rows: Build only the last *max_rows* rows — the ones around
+            the end of the run. An open-ended run grows the timeline by ~170k
+            rows a day, and rendering all of it costs hundreds of MB; the full
+            timeline lives in :attr:`metrics_csv_path`.
         """
+        metrics = self.metrics
+        if max_rows is not None:
+            # Two rows per chunk on a stereo capture, so take enough chunks to
+            # cover max_rows and let the tail trim below do the exact cut.
+            metrics = metrics[-max_rows:]
         rows = []
-        for metric in self.metrics:
+        for metric in metrics:
             for ch_idx, ch_mertric in enumerate(metric.channels):
                 rows.append(
                     {
@@ -166,6 +182,8 @@ class ValidationResult:  # pylint: disable=too-many-instance-attributes
                         "reason": metric.reason,
                     }
                 )
+        if max_rows is not None:
+            rows = rows[-max_rows:]
         return pd.DataFrame(rows)
 
     def failure_details(self) -> str:

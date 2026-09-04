@@ -1,3 +1,7 @@
+### 0.3.5
+
+[PATCH] Add saving metrics to csv file during the validation run.
+
 ### 0.3.4
 
 [PATCH] Add non-blocking chunk validation skip to transition conditions.
