@@ -1,3 +1,7 @@
+### 0.3.7
+
+[PATCH] Fix THD+N calculation in ChannelFeatures
+
 ### 0.3.6
 
 [PATCH] Skip evaluating partial chunks.

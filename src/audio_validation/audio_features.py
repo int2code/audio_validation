@@ -145,7 +145,7 @@ class ChannelFeatures:
             thd_val = ChannelFeatures.calculate_thd(
                 x_frequencies, y_amplitudes, sample_rate
             )
-            thd_n_val = ChannelFeatures.calculate_thd_n(samples, sample_rate)
+            thd_n_val = ChannelFeatures.calculate_thd_n(samples)
             checks = []
             failed_peaks = []
 
