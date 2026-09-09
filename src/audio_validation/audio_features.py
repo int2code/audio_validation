@@ -30,6 +30,14 @@ save_plot_lock = threading.Lock()
 #: check still fails, correctly) but flatten the metrics plot and bloat the CSV.
 MAX_REPORTED_DISTORTION_PCT = 1000.0
 
+#: Harmonics counted by :attr:`ChannelFeatures.thd_h2_h5` — the 2nd through 5th, the
+#: range conventionally quoted as "THD".  The field name states the range because the
+#: number is part of what the figure means: quoting a THD without it is ambiguous.
+DEFAULT_THD_HARMONICS = 5
+
+#: Audio band used by :attr:`ChannelFeatures.thd_audio` and by THD+N, in Hz.
+AUDIO_BAND_HZ = (20.0, 20000.0)
+
 
 # pylint:disable=too-many-instance-attributes, too-many-locals, too-many-positional-arguments
 # pylint:disable=too-many-arguments
@@ -53,10 +61,16 @@ class ChannelFeatures:
     :cvar min: Minimum sample value.
     :cvar dbs: Level in dBFS (placeholder, populated as ``-90.0`` by default).
     :cvar mean: Arithmetic mean of the channel samples.
-    :cvar thd: Total Harmonic Distortion as a percentage (e.g. ``1.0`` for 1 % THD).
-        Measures only the amplitude at integer harmonics of the fundamental, which is
-        located near the expected frequency.  Populated when FFT detection is
-        requested; ``None`` when it is not, or when the expected tone is absent.
+    :cvar thd_h2_h5: Total Harmonic Distortion over the 2nd to 5th harmonics, as a
+        percentage (e.g. ``1.0`` for 1 %).  This is the range conventionally quoted as
+        "THD".  Populated when FFT detection is requested; ``None`` when it is not, or
+        when the expected tone is absent.
+    :cvar thd_audio: Total Harmonic Distortion over *every* harmonic falling inside
+        the audio band (:data:`AUDIO_BAND_HZ`), as a percentage.  A device whose
+        distortion is spread over many high-order harmonics — a switching output stage,
+        say — can show a low :attr:`thd_h2_h5` and a much higher :attr:`thd_audio`, so
+        the two together say more than either alone.  Comparable with
+        :attr:`thd_n`, which covers the same band.
     :cvar thd_n: Total Harmonic Distortion + Noise as a percentage, measured over
         20 Hz - 20 kHz with the fundamental notched out.  Unlike :attr:`thd`, it
         counts *all* non-fundamental energy (harmonics **and** broadband noise)
@@ -78,7 +92,8 @@ class ChannelFeatures:
     min: float = 0
     dbs: float = 0
     mean: float = 0
-    thd: float = None
+    thd_h2_h5: float = None
+    thd_audio: float = None
     thd_n: float = None
     start_audio_offset_s: int = -1
 
@@ -116,9 +131,9 @@ class ChannelFeatures:
             *start_audio_offset_s* is not supplied.  Defaults to ``100`` (tuned
             for integer-PCM samples); use a smaller value for float-voltage
             captures.
-        :return: Fully populated :class:`ChannelFeatures` instance.  :attr:`thd`
-            and :attr:`thd_n` are computed when FFT detection is requested;
-            ``None`` otherwise.
+        :return: Fully populated :class:`ChannelFeatures` instance.
+            :attr:`thd_h2_h5`, :attr:`thd_audio` and :attr:`thd_n` are computed when
+            FFT detection is requested; ``None`` otherwise.
         """
         samples_float = samples.astype(np.float64)
         rms_val = round(np.sqrt(np.mean(samples_float**2)), 2)
@@ -134,7 +149,8 @@ class ChannelFeatures:
         failed_peaks = None
         peak_frequencies = None
         peak_amplitudes = None
-        thd_val = None
+        thd_h2_h5_val = None
+        thd_audio_val = None
         thd_n_val = None
 
         if (
@@ -155,7 +171,10 @@ class ChannelFeatures:
                 spectrum, expected_frequencies
             )
             if fundamental_hz is not None:
-                thd_val = ChannelFeatures.calculate_thd(spectrum, fundamental_hz)
+                thd_h2_h5_val = ChannelFeatures.calculate_thd(spectrum, fundamental_hz)
+                thd_audio_val = ChannelFeatures.calculate_thd_audio(
+                    spectrum, fundamental_hz
+                )
                 thd_n_val = ChannelFeatures.calculate_thd_n(spectrum, fundamental_hz)
             checks = []
             failed_peaks = []
@@ -179,7 +198,8 @@ class ChannelFeatures:
             min=min_val,
             dbs=-90.0,
             mean=mean_val,
-            thd=thd_val,
+            thd_h2_h5=thd_h2_h5_val,
+            thd_audio=thd_audio_val,
             thd_n=thd_n_val,
             start_audio_offset_s=start_audio_offset_s,
         )
@@ -251,63 +271,127 @@ class ChannelFeatures:
         )
 
     @staticmethod
-    def calculate_thd(
+    def _thd_from_harmonics(
         spectrum: Spectrum,
         fundamental_hz: float,
-        num_harmonics: int = 5,
+        num_harmonics: Optional[int] = None,
+        upper_hz: Optional[float] = None,
     ) -> Optional[float]:
-        """Calculate Total Harmonic Distortion (THD) from a windowed spectrum.
+        """Root-sum-square of harmonic amplitudes over the fundamental, as a percent.
 
-        Uses the amplitude-ratio definition::
+        Shared by :meth:`calculate_thd` and :meth:`calculate_thd_audio`, which differ
+        only in where they stop: a harmonic count, or a frequency ceiling.
 
-            THD = sqrt(A2^2 + A3^2 + ... + An^2) / A1 * 100 %
-
-        where ``A1`` is the amplitude of the fundamental and ``A2``-``An`` are the
-        amplitudes of the 2nd through *num_harmonics*-th harmonics.  Each amplitude is
-        the largest bin in a narrow search window around the nominal frequency, which
-        tolerates the small frequency offset that playback and capture clock drift
-        always produces.  Harmonics at or above Nyquist are excluded.
-
-        The fundamental is located near *fundamental_hz* rather than by taking the
-        largest bin in the spectrum, so a DC offset or an unrelated spur cannot be
-        mistaken for it.
-
-        A harmonic buried in the noise floor reads as the largest noise bin in its
-        search window rather than as zero, which biases THD slightly upward when the
-        harmonics are near the floor.  The QA40x software behaves the same way, so the
-        two remain comparable.
-
-        :param spectrum: Windowed :class:`~audio_validation.spectrum.Spectrum` of the
-            channel.
-        :param fundamental_hz: Nominal fundamental frequency in Hz — normally the
-            frequency the signal generator was asked to produce.
-        :param num_harmonics: Highest harmonic to include (default ``5``, covering
-            harmonics 2-5).
-        :return: THD as a percentage (e.g. ``1.0`` for 1 % THD), capped at
-            :data:`MAX_REPORTED_DISTORTION_PCT`; ``None`` when the fundamental cannot
-            be found or has zero amplitude.
+        :param spectrum: Windowed spectrum of the channel.
+        :param fundamental_hz: Nominal fundamental frequency in Hz.
+        :param num_harmonics: Highest harmonic to include; ``None`` for no count limit.
+        :param upper_hz: Frequency ceiling in Hz; clamped to Nyquist either way.
+        :return: THD as a percentage, capped at :data:`MAX_REPORTED_DISTORTION_PCT`;
+            ``None`` when the fundamental cannot be found or has zero amplitude.
         """
         fund_freq, fund_amp = spectrum.peak_near(fundamental_hz)
         if fund_freq is None or fund_freq <= 0 or fund_amp <= 0:
             return None
 
+        ceiling = (
+            spectrum.nyquist if upper_hz is None else min(upper_hz, spectrum.nyquist)
+        )
         harmonic_power = 0.0
-        for harmonic in range(2, num_harmonics + 1):
+        harmonic = 2
+        while num_harmonics is None or harmonic <= num_harmonics:
             harmonic_hz = harmonic * fund_freq
-            if harmonic_hz >= spectrum.nyquist:
+            if harmonic_hz >= ceiling:
                 break
             _, amplitude = spectrum.peak_near(harmonic_hz)
             harmonic_power += amplitude**2
+            harmonic += 1
 
         thd = float(np.sqrt(harmonic_power) / fund_amp * 100)
         return min(thd, MAX_REPORTED_DISTORTION_PCT)
+
+    @staticmethod
+    def calculate_thd(
+        spectrum: Spectrum,
+        fundamental_hz: float,
+        num_harmonics: int = DEFAULT_THD_HARMONICS,
+    ) -> Optional[float]:
+        """Calculate THD over the first *num_harmonics* harmonics.
+
+        Uses the amplitude-ratio definition::
+
+            THD = sqrt(A2^2 + A3^2 + ... + An^2) / A1 * 100 %
+
+        where ``A1`` is the amplitude of the fundamental and ``A2``-``An`` those of the
+        2nd through *num_harmonics*-th harmonics.  Each amplitude is the largest bin in
+        a narrow search window around the nominal frequency, which tolerates the small
+        offset that playback and capture clock drift always produces.  Harmonics at or
+        above Nyquist are excluded.
+
+        The fundamental is located near *fundamental_hz* rather than by taking the
+        largest bin in the spectrum, so a DC offset or an unrelated spur cannot be
+        mistaken for it.
+
+        This is the range conventionally quoted as "THD".  It says nothing about
+        harmonics above the *num_harmonics*-th — for a device whose distortion runs to
+        high order, see :meth:`calculate_thd_audio`.
+
+        A harmonic buried in the noise floor reads as the largest noise bin in its
+        search window rather than as zero, which biases the result slightly upward when
+        the harmonics are near the floor.
+
+        :param spectrum: Windowed :class:`~audio_validation.spectrum.Spectrum` of the
+            channel.
+        :param fundamental_hz: Nominal fundamental frequency in Hz — normally the
+            frequency the signal generator was asked to produce.
+        :param num_harmonics: Highest harmonic to include (default
+            :data:`DEFAULT_THD_HARMONICS`, covering harmonics 2-5).
+        :return: THD as a percentage (e.g. ``1.0`` for 1 % THD), capped at
+            :data:`MAX_REPORTED_DISTORTION_PCT`; ``None`` when the fundamental cannot
+            be found or has zero amplitude.
+        """
+        return ChannelFeatures._thd_from_harmonics(
+            spectrum, fundamental_hz, num_harmonics=num_harmonics
+        )
+
+    @staticmethod
+    def calculate_thd_audio(
+        spectrum: Spectrum,
+        fundamental_hz: float,
+        band_hz: tuple = AUDIO_BAND_HZ,
+    ) -> Optional[float]:
+        """Calculate THD over every harmonic inside the audio band.
+
+        Same definition as :meth:`calculate_thd` but with no harmonic count: every
+        integer multiple of the fundamental up to the top of *band_hz* is included.
+
+        Distortion does not always concentrate in the low-order harmonics.  A switching
+        output stage or a quantiser spreads it over a long series reaching to the top of
+        the band, and counting only the first four then reports a small fraction of what
+        is there.  Measuring both makes the difference visible instead of hiding it in
+        the choice of harmonic count.
+
+        Because it covers the same band as :meth:`calculate_thd_n`, the two are directly
+        comparable: when they agree, the residual is essentially all harmonic; when
+        THD+N is much the larger, there is real broadband noise underneath.
+
+        :param spectrum: Windowed :class:`~audio_validation.spectrum.Spectrum` of the
+            channel.
+        :param fundamental_hz: Nominal fundamental frequency in Hz.
+        :param band_hz: ``(low, high)`` band in Hz; only the upper edge is used, clamped
+            to Nyquist.  Defaults to :data:`AUDIO_BAND_HZ`.
+        :return: THD as a percentage, capped at :data:`MAX_REPORTED_DISTORTION_PCT`;
+            ``None`` when the fundamental cannot be found or has zero amplitude.
+        """
+        return ChannelFeatures._thd_from_harmonics(
+            spectrum, fundamental_hz, upper_hz=band_hz[1]
+        )
 
     @staticmethod
     def calculate_thd_n(
         spectrum: Spectrum,
         fundamental_hz: float,
         notch_octaves: float = 0.5,
-        band_hz: tuple = (20.0, 20000.0),
+        band_hz: tuple = AUDIO_BAND_HZ,
     ) -> Optional[float]:
         """Calculate Total Harmonic Distortion + Noise (THD+N) from a spectrum.
 
@@ -335,6 +419,7 @@ class ChannelFeatures:
         :param notch_octaves: Half-width of the notch around the fundamental, in
             octaves (default ``0.5``).
         :param band_hz: ``(low, high)`` measurement band in Hz, clamped to Nyquist.
+            Defaults to :data:`AUDIO_BAND_HZ`, the same band as :meth:`calculate_thd_audio`.
         :return: THD+N as a percentage (e.g. ``1.0`` for 1 %), capped at
             :data:`MAX_REPORTED_DISTORTION_PCT`; ``None`` when the fundamental cannot
             be found or has zero energy.

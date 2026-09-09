@@ -499,7 +499,8 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             channels=[
                 ChannelMetric(
                     rms=feat.rms,
-                    thd=feat.thd,
+                    thd_h2_h5=feat.thd_h2_h5,
+                    thd_audio=feat.thd_audio,
                     thd_n=feat.thd_n,
                     detected=feat.detected,
                     peak_frequencies=(

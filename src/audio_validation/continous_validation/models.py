@@ -64,10 +64,17 @@ class RawChunk:
 
 @dataclass
 class ChannelMetric:
-    """Per-channel scalar metrics for one chunk (no raw samples)."""
+    """Per-channel scalar metrics for one chunk (no raw samples).
+
+    :ivar thd_h2_h5: THD over the 2nd-5th harmonics, percent — the range
+        conventionally quoted as "THD".
+    :ivar thd_audio: THD over every harmonic in the audio band, percent. Directly
+        comparable with :attr:`thd_n`, which covers the same band.
+    """
 
     rms: float
-    thd: Optional[float]
+    thd_h2_h5: Optional[float]
+    thd_audio: Optional[float]
     thd_n: Optional[float]
     detected: bool
     peak_frequencies: list
@@ -175,7 +182,8 @@ class ValidationResult:  # pylint: disable=too-many-instance-attributes
                         "end": format_timestamp(metric.end_s),
                         "ch": ch_idx,
                         "rms": ch_mertric.rms,
-                        "thd": ch_mertric.thd,
+                        "thd_h2_h5": ch_mertric.thd_h2_h5,
+                        "thd_audio": ch_mertric.thd_audio,
                         "thd_n": ch_mertric.thd_n,
                         "detected": ch_mertric.detected,
                         "ok": metric.ok,

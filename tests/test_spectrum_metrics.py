@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from audio_validation.audio_features import (
+    AUDIO_BAND_HZ,
     MAX_REPORTED_DISTORTION_PCT,
     AudioFeatures,
     ChannelFeatures,
@@ -201,8 +202,9 @@ def test_compute_populates_thd_for_every_channel():
         freq_checker=all,
         activity_threshold=0.05,
     )
-    assert features[0].thd == pytest.approx(1.0, rel=1e-2)
-    assert features[1].thd < 0.005
+    assert features[0].thd_h2_h5 == pytest.approx(1.0, rel=1e-2)
+    assert features[1].thd_h2_h5 < 0.005
+    assert features[0].thd_audio == pytest.approx(1.0, rel=1e-2)
     assert all(channel.detected for channel in features.channel_features)
 
 
@@ -222,3 +224,75 @@ def test_multitone_tones_are_resolved_without_spurious_peaks():
     assert features[0].detected
     assert features[0].failed_peaks == []
     assert len(features[0].peak_frequencies) == len(tones)
+
+
+# --- full-band THD ----------------------------------------------------------------
+
+
+def _tone_with_harmonic_series(freq_hz, harmonics, level_pct):
+    """Return a tone carrying each harmonic in *harmonics* at *level_pct* of it."""
+    samples = np.arange(SAMPLE_RATE) / SAMPLE_RATE
+    signal = AMPLITUDE * np.sin(2 * np.pi * freq_hz * samples)
+    for harmonic in harmonics:
+        signal += (
+            AMPLITUDE
+            * (level_pct / 100)
+            * np.sin(2 * np.pi * harmonic * freq_hz * samples)
+        )
+    return signal
+
+
+def test_thd_audio_counts_harmonics_that_thd_h2_h5_misses():
+    """High-order harmonics are invisible to the H2-H5 figure but not to the band one."""
+    # four equal harmonics, only one of which is inside H2-H5
+    spectrum = Spectrum(
+        _tone_with_harmonic_series(100.0, [3, 40, 90, 150], 0.5), SAMPLE_RATE
+    )
+    low_order = ChannelFeatures.calculate_thd(spectrum, 100.0)
+    full_band = ChannelFeatures.calculate_thd_audio(spectrum, 100.0)
+    assert low_order == pytest.approx(0.5, rel=1e-2)
+    assert full_band == pytest.approx(0.5 * np.sqrt(4), rel=1e-2)
+
+
+def test_thd_audio_matches_thd_when_all_harmonics_are_low_order():
+    """With nothing above H5 the two figures agree."""
+    spectrum = Spectrum(_tone_with_harmonic_series(100.0, [2, 3], 1.0), SAMPLE_RATE)
+    assert ChannelFeatures.calculate_thd_audio(spectrum, 100.0) == pytest.approx(
+        ChannelFeatures.calculate_thd(spectrum, 100.0), rel=1e-3
+    )
+
+
+def test_thd_audio_stops_at_the_top_of_the_band():
+    """A harmonic above 20 kHz is excluded even though it is below Nyquist."""
+    samples = np.arange(SAMPLE_RATE) / SAMPLE_RATE
+    # 21 kHz harmonic of a 7 kHz tone: below Nyquist (24 kHz), above the band
+    signal = AMPLITUDE * np.sin(2 * np.pi * 7000 * samples) + AMPLITUDE * 0.01 * np.sin(
+        2 * np.pi * 21000 * samples
+    )
+    spectrum = Spectrum(signal, SAMPLE_RATE)
+    assert ChannelFeatures.calculate_thd_audio(spectrum, 7000.0) < 0.05
+    assert ChannelFeatures.calculate_thd_audio(
+        spectrum, 7000.0, band_hz=(20.0, 24000.0)
+    ) == pytest.approx(1.0, rel=1e-2)
+
+
+def test_thd_audio_is_never_below_thd_h2_h5():
+    """The band figure is a superset of the low-order one."""
+    spectrum = Spectrum(
+        _tone_with_harmonic_series(100.0, [2, 5, 9, 33], 0.2), SAMPLE_RATE
+    )
+    assert ChannelFeatures.calculate_thd_audio(
+        spectrum, 100.0
+    ) >= ChannelFeatures.calculate_thd(spectrum, 100.0)
+
+
+def test_thd_audio_uses_the_shared_audio_band_constant():
+    """THD+N and full-band THD must cover the same band to stay comparable."""
+    assert AUDIO_BAND_HZ == (20.0, 20000.0)
+
+
+@pytest.mark.parametrize("metric", ["calculate_thd", "calculate_thd_audio"])
+def test_silence_reports_none_for_both_thd_flavours(metric):
+    """Neither figure invents a 0 % reading for a signal that is not there."""
+    spectrum = Spectrum(np.zeros(SAMPLE_RATE), SAMPLE_RATE)
+    assert getattr(ChannelFeatures, metric)(spectrum, 100.0) is None
