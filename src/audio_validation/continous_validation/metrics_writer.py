@@ -71,7 +71,10 @@ class MetricsCsvWriter:
         if directory:
             os.makedirs(directory, exist_ok=True)
         # line_buffering off: flushing is driven by ``flush_every`` instead.
-        self._file = open(self._path, "w", encoding="utf-8", newline="")
+        # Not a ``with``: the handle outlives this call and is closed in ``close``.
+        self._file = open(  # pylint: disable=consider-using-with
+            self._path, "w", encoding="utf-8", newline=""
+        )
         self._writer = csv.writer(self._file)
         self._writer.writerow(COLUMNS)
 
