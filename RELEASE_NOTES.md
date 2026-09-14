@@ -1,3 +1,7 @@
+### 0.4.0
+
+[MINOR] Measure THD and THD+N from a windowed spectrum. Report THD over the whole audio band as well as H2-H5.
+
 ### 0.3.7
 
 [PATCH] Fix THD+N calculation in ChannelFeatures

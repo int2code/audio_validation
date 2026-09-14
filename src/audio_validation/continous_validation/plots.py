@@ -18,7 +18,12 @@ from matplotlib import (
 
 logger = logging.getLogger(__name__)
 
-_SERIES = [("rms", "RMS"), ("thd", "THD %"), ("thd_n", "THD+N %")]
+_SERIES = [
+    ("rms", "RMS"),
+    ("thd_h2_h5", "THD H2-H5 %"),
+    ("thd_audio", "THD audio band %"),
+    ("thd_n", "THD+N %"),
+]
 
 
 def plot_metrics_timeline(

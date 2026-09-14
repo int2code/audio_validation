@@ -33,7 +33,8 @@ COLUMNS = (
     "end",
     "ch",
     "rms",
-    "thd",
+    "thd_h2_h5",
+    "thd_audio",
     "thd_n",
     "detected",
     "ok",
@@ -70,7 +71,10 @@ class MetricsCsvWriter:
         if directory:
             os.makedirs(directory, exist_ok=True)
         # line_buffering off: flushing is driven by ``flush_every`` instead.
-        self._file = open(self._path, "w", encoding="utf-8", newline="")
+        # Not a ``with``: the handle outlives this call and is closed in ``close``.
+        self._file = open(  # pylint: disable=consider-using-with
+            self._path, "w", encoding="utf-8", newline=""
+        )
         self._writer = csv.writer(self._file)
         self._writer.writerow(COLUMNS)
 
@@ -97,7 +101,8 @@ class MetricsCsvWriter:
                         format_timestamp(metric.end_s),
                         channel_index,
                         channel.rms,
-                        channel.thd,
+                        channel.thd_h2_h5,
+                        channel.thd_audio,
                         channel.thd_n,
                         channel.detected,
                         metric.ok,

@@ -45,7 +45,11 @@ class AudioCriteria:
     :ivar require_audio_present: Fail if any channel is silent (RMS <= threshold).
     :ivar expected_rms: Per-channel expected RMS values.
     :ivar rms_tolerance: Allowed absolute deviation from :attr:`expected_rms`.
-    :ivar max_thd: Maximum allowed THD percent (requires expected_frequencies).
+    :ivar max_thd: Maximum allowed THD (2nd-5th harmonics) percent; requires
+        expected_frequencies.
+    :ivar max_thd_audio: Maximum allowed THD over every harmonic in the audio band,
+        percent; requires expected_frequencies.  Left at ``None`` the figure is still
+        recorded, just not judged.
     :ivar max_thd_n: Maximum allowed THD+N percent (requires expected_frequencies).
     :ivar custom_check: Optional hook ``(features) -> (ok, reason)`` run last.
     """
@@ -60,6 +64,7 @@ class AudioCriteria:
     expected_rms: Optional[List[float]] = None
     rms_tolerance: Optional[float] = None
     max_thd: Optional[float] = None
+    max_thd_audio: Optional[float] = None
     max_thd_n: Optional[float] = None
     custom_check: Optional[Callable[[AudioFeatures], Tuple[bool, str]]] = None
 
@@ -292,7 +297,7 @@ def check_frequency(features: AudioFeatures) -> CheckResult:
 
 
 def check_thd(features: AudioFeatures, max_thd: float) -> CheckResult:
-    """Check that each channel's THD is at/below *max_thd* percent.
+    """Check each channel's THD over the 2nd-5th harmonics against *max_thd*.
 
     Channels with THD not computed (``None``) are treated as passing.
 
@@ -304,9 +309,9 @@ def check_thd(features: AudioFeatures, max_thd: float) -> CheckResult:
     rows = [
         {
             "ch": _channel_label(ch),
-            "thd_percent": feat.thd,
+            "thd_h2_h5_percent": feat.thd_h2_h5,
             "tolerance": max_thd,
-            "thd_ok": feat.thd is None or feat.thd <= max_thd,
+            "thd_ok": feat.thd_h2_h5 is None or feat.thd_h2_h5 <= max_thd,
         }
         for ch, feat in enumerate(features.channel_features)
     ]
@@ -318,7 +323,43 @@ def check_thd(features: AudioFeatures, max_thd: float) -> CheckResult:
     return CheckResult(
         "thd",
         False,
-        f"THD above tolerance ({max_thd} %) on {len(failed_df)} channel(s)",
+        f"THD (H2-H5) above tolerance ({max_thd} %) on {len(failed_df)} channel(s)",
+        failed_df,
+    )
+
+
+def check_thd_audio(features: AudioFeatures, max_thd_audio: float) -> CheckResult:
+    """Check each channel's full-band THD against *max_thd_audio*.
+
+    Counts every harmonic in the audio band rather than only the first four, so it
+    catches a device whose distortion runs to high order — which
+    :func:`check_thd` would under-report. Channels with the figure not computed
+    (``None``) are treated as passing.
+
+    :param features: Per-channel features to check.
+    :param max_thd_audio: Maximum allowed full-band THD as a percentage.
+    :return: A passing :class:`CheckResult`, or a failing one carrying the
+        channels above tolerance.
+    """
+    rows = [
+        {
+            "ch": _channel_label(ch),
+            "thd_audio_percent": feat.thd_audio,
+            "tolerance": max_thd_audio,
+            "thd_audio_ok": feat.thd_audio is None or feat.thd_audio <= max_thd_audio,
+        }
+        for ch, feat in enumerate(features.channel_features)
+    ]
+    df = pd.DataFrame(rows).set_index("ch")
+
+    failed_df = df[~df["thd_audio_ok"]]
+    if failed_df.empty:
+        return CheckResult("thd_audio", True)
+    return CheckResult(
+        "thd_audio",
+        False,
+        f"THD (audio band) above tolerance ({max_thd_audio} %) on "
+        f"{len(failed_df)} channel(s)",
         failed_df,
     )
 
@@ -383,6 +424,8 @@ def evaluate_chunk(features: AudioFeatures, criteria: AudioCriteria) -> ChunkVer
         results.append(check_frequency(features))
     if criteria.max_thd is not None:
         results.append(check_thd(features, criteria.max_thd))
+    if criteria.max_thd_audio is not None:
+        results.append(check_thd_audio(features, criteria.max_thd_audio))
     if criteria.max_thd_n is not None:
         results.append(check_thd_n(features, criteria.max_thd_n))
     if criteria.custom_check is not None:
