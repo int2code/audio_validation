@@ -1,3 +1,7 @@
+### 0.4.1
+
+[MINOR] Adjust to pytest 9.2.0 release
+
 ### 0.4.0
 
 [MINOR] Measure THD and THD+N from a windowed spectrum. Report THD over the whole audio band as well as H2-H5.

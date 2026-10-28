@@ -13,7 +13,6 @@ from typing import Any, Callable, Optional, Union
 
 import numpy as np
 import pytest
-from _pytest.python_api import ApproxBase
 from matplotlib import pyplot as plt
 from scipy.signal import find_peaks
 from scipy.io import wavfile
@@ -643,15 +642,14 @@ def _dominant_expected_frequency(
 
 def _calculate_approx_values(
     frequencies: list[int], tolerance: int | float
-) -> list[ApproxBase]:
+) -> list[Any]:
     """Return pytest.approx wrappers for each frequency ± tolerance.
 
     :param frequencies: List of frequency values in Hz to wrap in
         :func:`pytest.approx`.
     :param tolerance: Absolute tolerance applied symmetrically to each
         frequency.
-    :return: List of :class:`~_pytest.python_api.ApproxBase` objects, one per
-        input frequency.
+    :return: One :func:`pytest.approx` object per input frequency.
     """
     expected_freq_approx = list(
         map(lambda x: pytest.approx(x, abs=tolerance), frequencies)
