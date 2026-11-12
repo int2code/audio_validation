@@ -56,8 +56,10 @@ class ValidatorConfig:
     :param channels: Channel count (used only with *capture_fn*).
     :param chunk_s: Analysis chunk size in seconds.
     :param max_capture_s: Capture-time limit; ``None`` means unlimited.
-    :param pre_failure_s: Seconds retained before failure; ``None`` keeps all.
-    :param post_failure_s: Seconds retained/captured after a failure.
+    :param pre_failure_s: Seconds retained before the first failure; ``None``
+        keeps all.
+    :param post_failure_s: Seconds retained after the first failure, and
+        captured after it when *stop_on_failure* is set.
     :param stop_on_failure: Stop the run on the first armed failure. When
         ``False`` the run continues to completion but the failure is still
         reported in :attr:`ValidationResult.failure`.
@@ -257,6 +259,12 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
         """Return a copy of the metrics timeline collected so far."""
         with self._state_lock:
             return list(self._metrics)
+
+    @property
+    def failure(self) -> Optional[FailureInfo]:
+        """First failure armed so far, or ``None``; ``wav_offset_s`` is not set yet."""
+        with self._state_lock:
+            return self._failure_info
 
     @property
     def is_running(self) -> bool:
@@ -526,7 +534,7 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
         self._consec_fail += 1
         if self._consec_fail < self._cfg.failure_consecutive:
             return
-        arm_stop = False
+        first_failure = False
         with self._state_lock:
             if self._failure_info is None:
                 self._failure_info = FailureInfo(
@@ -535,12 +543,11 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
                     reason=verdict.detail,
                     wav_offset_s=0.0,  # will be updated when wav is written
                 )
-            # ``_failure_time_s`` arms the run teardown (reader break + retention
-            # freeze), so it is only set when the run is meant to stop.
-            if self._cfg.stop_on_failure and self._failure_time_s is None:
-                self._failure_time_s = chunk.end_s
-                arm_stop = True
-        if arm_stop:
+                first_failure = True
+                # Arms the reader break, so it is set only when the run is meant to stop.
+                if self._cfg.stop_on_failure:
+                    self._failure_time_s = chunk.end_s
+        if first_failure:
             self._retention.freeze(chunk.end_s)
 
     # Finalising the run and assembling the result ------------------------------------------------
@@ -619,8 +626,6 @@ class ContinuousAudioValidator:  # pylint: disable=too-many-instance-attributes
             error = self._error
             metrics = list(self._metrics)
 
-        # Without ``stop_on_failure`` the retention window keeps rolling, so the
-        # failing chunk may have been evicted before the WAV was written.
         failure_in_wav = (
             failure is not None
             and wav_start is not None
