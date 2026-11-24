@@ -1,3 +1,7 @@
+### 0.4.2
+
+[PATCH] Keep the audio around the first failure in the saved WAV when stop_on_failure is False. Add ContinuousAudioValidator.failure.
+
 ### 0.4.1
 
 [MINOR] Adjust to pytest 9.2.0 release

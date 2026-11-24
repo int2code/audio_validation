@@ -4,9 +4,10 @@ Touched only by the analysis (consumer) thread, so it needs no locking.
 
 Before a failure the buffer evicts the oldest chunks to hold at most
 ``pre_failure_s`` seconds. On :meth:`freeze` it stops evicting (preserving the
-pre-failure window) and keeps appending until ``post_failure_s`` of audio past
-the failure has accrued. ``pre_failure_s=None`` keeps everything (memory grows
-with run length — caller opt-in).
+pre-failure window), keeps appending until ``post_failure_s`` of audio past
+the failure has accrued, and drops every chunk after that.
+``pre_failure_s=None`` keeps everything before a failure (memory grows with run
+length — caller opt-in).
 
 Retained chunks are stored as :class:`RawChunk` unchanged (original sample
 dtype); dtype conversion for the saved WAV happens at write time in the caller.
@@ -27,8 +28,7 @@ class RetentionBuffer:
     """Rolling window of recent raw chunks with front-freeze on failure.
 
     :param pre_failure_s: Seconds to retain before failure; ``None`` = keep all.
-    :param post_failure_s: Seconds to retain after failure (used by callers to
-        decide when to stop; enforced by :meth:`post_failure_captured_s`).
+    :param post_failure_s: Seconds to retain after failure.
     :param sample_rate: Sample rate in Hz (for duration accounting).
     """
 
@@ -46,9 +46,14 @@ class RetentionBuffer:
         self._failure_end_s: Optional[float] = None
 
     def add(self, chunk: RawChunk) -> None:
-        """Append *chunk*; evict oldest to honour ``pre_failure_s`` unless frozen."""
+        """Append *chunk*; before :meth:`freeze` evict the oldest, after it drop
+        *chunk* once ``post_failure_s`` past the failure is retained."""
+        if self._frozen:
+            if self.post_failure_captured_s() < self._post_failure_s:
+                self._chunks.append(chunk)
+            return
         self._chunks.append(chunk)
-        if self._frozen or self._pre_failure_s is None:
+        if self._pre_failure_s is None:
             return
         while len(self._chunks) > 1 and self.total_s() > self._pre_failure_s:
             self._chunks.popleft()
